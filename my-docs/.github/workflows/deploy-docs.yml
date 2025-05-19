@@ -44,5 +44,5 @@ jobs:
         uses: JamesIves/github-pages-deploy-action@v4
         with:
           # 部署文档
-          branch: main
+          branch: gh-pages
           folder: src/.vuepress/dist
