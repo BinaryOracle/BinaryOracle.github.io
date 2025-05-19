@@ -7,7 +7,7 @@ export default defineUserConfig({
 
   lang: "zh-CN",
   title: "MetaMind",
-  description: "vuepress-theme-hope 的博客演示",
+  description: "探索AI边界,拥抱智能未来",
 
   theme,
 

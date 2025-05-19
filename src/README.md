@@ -2,9 +2,9 @@
 home: true
 layout: Blog
 icon: house
-bgImage: ./.vuepress/public/assets/images/bg.png
+bgImage: images/bg.png
 title: 主页
-heroImage: ./.vuepress/public/assets/images/head.png
+heroImage: images/head.png
 heroText: MetaMind
 heroFullScreen: true
 tagline: 探索AI边界，拥抱智能未来

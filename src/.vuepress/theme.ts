@@ -12,7 +12,7 @@ export default hopeTheme({
     email: "zdhdhyzdhdhy@gmail.com",
   },
   
-  logo: "./.vuepress/public/assets/images/head.png",
+  logo: "images/head.png",
 
   docsDir: "src",
 
