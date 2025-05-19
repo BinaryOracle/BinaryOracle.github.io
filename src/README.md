@@ -36,7 +36,7 @@ projects:
     name: 团队成员
     desc: 团队成员详细介绍
     #link: http://localhost:8080/intro.html
-        link: http://binaryoracle.github.io/intro.html
+    link: http://binaryoracle.github.io/intro.html
 
 footer: 探索AI边界，拥抱智能未来
 ---
