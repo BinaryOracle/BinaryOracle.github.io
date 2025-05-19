@@ -2,9 +2,9 @@
 home: true
 layout: Blog
 icon: house
-bgImage: images/bg.png
+bgImage: assets/images/bg.png
 title: 主页
-heroImage: images/head.png
+heroImage: assets/images/head.png
 heroText: MetaMind
 heroFullScreen: true
 tagline: 探索AI边界，拥抱智能未来

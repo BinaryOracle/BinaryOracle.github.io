@@ -12,7 +12,7 @@ export default hopeTheme({
     email: "zdhdhyzdhdhy@gmail.com",
   },
   
-  logo: "images/head.png",
+  logo: "assets/images/head.png",
 
   docsDir: "src",
 

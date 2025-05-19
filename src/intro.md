@@ -1,6 +1,6 @@
 ---
 icon: circle-info
-cover: images/team.png
+cover: assets/images/team.png
 article: false
 dir:
   order: 4
