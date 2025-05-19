@@ -17,22 +17,26 @@ projects:
   - icon: folder-open
     name: 开源项目
     desc: 人工智能开源项目
-    link: http://localhost:8080/open_projects/
+    #link: http://localhost:8080/open_projects/
+    link: http://binaryoracle.github.io/open_projects/
 
   - icon: book
     name: 大语言模型
     desc: 大语言模型前沿技术
-    link: http://localhost:8080/LLM/
+    #link: http://localhost:8080/LLM/
+    link: http://binaryoracle.github.io/LLM/
 
   - icon: newspaper
     name: 多模态
     desc: 多模态前沿技术
-    link: http://localhost:8080/MMLLM/
+    #link: http://localhost:8080/MMLLM/
+    link: http://binaryoracle.github.io/MMLLM/
 
   - icon: user-group
     name: 团队成员
     desc: 团队成员详细介绍
-    link: http://localhost:8080/intro.html
+    #link: http://localhost:8080/intro.html
+        link: http://binaryoracle.github.io/intro.html
 
 footer: 探索AI边界，拥抱智能未来
 ---
