@@ -1,5 +1,6 @@
 import { defineUserConfig } from "vuepress";
-import { slimsearchPlugin } from '@vuepress/plugin-slimsearch'
+import { slimsearchPlugin } from '@vuepress/plugin-slimsearch';
+import { commentPlugin } from '@vuepress/plugin-comment';
 
 import theme from "./theme.js";
 
@@ -15,6 +16,14 @@ export default defineUserConfig({
   plugins: [
     slimsearchPlugin({
       indexContent: true
+    }),
+    commentPlugin({
+      comment: true,
+      provider: "Giscus",
+      repo: "BinaryOracle/BlogComment",
+      repoId: "R_kgDOOtFoWQ",
+      category: "General",
+      categoryId: "DIC_kwDOOtFoWc4CqXdZ",
     }),
   ],
 
