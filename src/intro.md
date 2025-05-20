@@ -3,7 +3,7 @@ icon: circle-info
 cover: assets/images/team.png
 article: false
 dir:
-  order: 4
+  order: 5
 
 footer: 探索AI边界，拥抱智能未来
 ---

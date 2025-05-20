@@ -5,4 +5,5 @@ export default navbar([
   "/LLM/",
   "/MMLLM/",
  "/open_projects/",
+ "/other/",
 ]);
