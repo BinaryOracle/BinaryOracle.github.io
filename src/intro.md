@@ -10,8 +10,16 @@ footer: 探索AI边界，拥抱智能未来
 
 # 关于我们
 
-**Binary Oracle: 一名普通但十分热爱探索技术的Coder , 开源框架spring committer , golang开源网络库netpoll committer , Javaer转型3D-VL方向研究。**
+### ![ =60x60](assets/images/head.png) Binary Oracle
+- 一名普通但十分热爱探索技术的Coder
+- 开源框架 Spring committer
+- Golang 开源网络库 netpoll committer
+- Javaer 转型 3D - VL 方向研究
 
-**Elowen: 一名深度学习小白，cv转llm领域。**
+---
+
+### ![ =60x60](assets/images/head.png) Elowen 
+- 一名深度学习小白
+- CV 转 LLM 领域
 
 
