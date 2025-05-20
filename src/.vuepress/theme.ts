@@ -65,6 +65,7 @@ export default hopeTheme({
     figure: true,
     gfm: true,
     imgLazyload: true,
+    imgMark: true,
     imgSize: true,
     include: true,
     mark: true,
@@ -88,6 +89,9 @@ export default hopeTheme({
     tabs: true,
     tasklist: true,
     vPre: true,
+    math: {
+      type: "mathjax",
+    },
   },
 
   // 在这里配置主题提供的插件

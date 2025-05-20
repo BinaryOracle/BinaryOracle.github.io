@@ -4,6 +4,8 @@ cover: assets/images/team.png
 article: false
 dir:
   order: 4
+
+footer: 探索AI边界，拥抱智能未来
 ---
 
 # 关于我们
