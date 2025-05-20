@@ -7,7 +7,7 @@ export default hopeTheme({
   hostname: "https://mister-hope.github.io",
 
   author: {
-    name: "BinaryOracle",
+    name: "MetaMind",
     url: "https://blog.csdn.net/m0_53157173",
     email: "zdhdhyzdhdhy@gmail.com",
   },
