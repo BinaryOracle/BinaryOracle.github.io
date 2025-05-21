@@ -5,14 +5,14 @@ category:
 tag:
   - 预训练语言模型
 footer: 探索AI边界，拥抱智能未来
-date: 2025-05-19
-cover: assets/cover/Bert.png
-order: 2
+date: 2025-05-21
+cover: assets/cover/Transformer.png
+order: 1
 ---
 
-`图解Bert & Bert文本分类实战` 
+`图解Transformer & 机器翻译实战` 
+
 <!-- more -->
 
-# 图解 Bert
+# 图解Transformer
 
-待续...
