@@ -4,6 +4,7 @@ category:
   - NLP
 tag:
   - 预训练语言模型
+  - 编辑中
 footer: 探索AI边界，拥抱智能未来
 date: 2025-05-21
 cover: assets/cover/Transformer.png
@@ -221,9 +222,7 @@ class Decoder(nn.Module):
         return self.norm(x)
 ```
 
-### Attention 结构
-
-#### 多头自注意力
+### 多头自注意力
 
 ![多头自注意力计算流程图](图解Transformer/9.png)
 
