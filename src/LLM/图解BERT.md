@@ -122,9 +122,6 @@ Read_Bert_Code/bert_read_step_to_step/chineseGLUEdatasets/tnews
 
 ![token_type_ids作用图解](图解BERT/2.png)
 
-```json
-[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-```
 ```python
      # BertTokenizer
      def create_token_type_ids_from_sequences(self, token_ids_0, token_ids_1=None):
@@ -163,3 +160,40 @@ Read_Bert_Code/bert_read_step_to_step/chineseGLUEdatasets/tnews
             encoded_inputs["special_tokens_mask"] = encoded_inputs["special_tokens_mask"][:max_length]
 ```
 
+8. 生成padding部分的mask列表
+
+![attention_mask作用图解](图解BERT/4.png)
+```python
+        # 生成注意力掩码，真实token对应1，填充token对应0
+        attention_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
+ ```
+
+ 9. 所有序列都填充到max_length长度,不足长度用padding填充
+
+![填充过程图](图解BERT/5.png)
+
+```python
+        # 记录输入长度
+        input_len = len(input_ids)
+        # 计算需要填充的长度 --- 所有输入序列等长，都等于max_length
+        padding_length = max_length - len(input_ids)
+        # 右填充
+        input_ids = input_ids + ([pad_token] * padding_length)
+        attention_mask = attention_mask + ([0 if mask_padding_with_zero else 1] * padding_length)
+        token_type_ids = token_type_ids + ([pad_token_segment_id] * padding_length)
+```
+
+10. 数据集中每一个样本最终都会解析得到一个InputFeatures
+
+![InputFeatures组成图解](图解BERT/6.png)
+
+```python
+features.append(
+            InputFeatures(input_ids=input_ids,
+                          attention_mask=attention_mask,
+                          token_type_ids=token_type_ids,
+                          label=label,
+                          input_len=input_len))
+```
+> label 是当前文本对应的类别标签
+> input_len 是序列实际长度(含special tokens)
