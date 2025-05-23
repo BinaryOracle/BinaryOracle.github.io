@@ -197,3 +197,11 @@ features.append(
 ```
 > label 是当前文本对应的类别标签
 > input_len 是序列实际长度(含special tokens)
+
+11. 数据集预处理完后，将InputFeatures List列表组装起来得到需要的DataSet
+
+```python
+dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_lens,all_labels)
+```
+
+## 模型架构
