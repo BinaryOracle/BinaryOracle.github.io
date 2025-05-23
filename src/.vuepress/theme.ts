@@ -94,6 +94,11 @@ export default hopeTheme({
     },
   },
 
+  pageInfo: ["Author", "Original", "Date", "Category", "Tag", "ReadingTime","Word"],
+
+  // fullscreen: true,
+  // focus: true,
+  
   // 在这里配置主题提供的插件
   plugins: {
     blog: true,

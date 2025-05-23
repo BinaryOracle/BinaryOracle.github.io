@@ -4,7 +4,7 @@ index: false
 icon: sun
 article: false
 dir:
-  order: 4
+  order: 6
 footer: 探索AI边界，拥抱智能未来  
 ---
 

@@ -7,6 +7,8 @@ tag:
 footer: 探索AI边界，拥抱智能未来
 date: 2025-05-20
 cover: assets/cover/CLIP.png
+author:
+  - BinaryOracle
 ---
 
 `多模态模型CLIP原理与图片分类，文字搜索图像实战演练` 
