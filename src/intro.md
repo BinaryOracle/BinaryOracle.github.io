@@ -15,11 +15,13 @@ footer: 探索AI边界，拥抱智能未来
 - 开源框架 Spring committer
 - Golang 开源网络库 netpoll committer
 - Javaer 转型 3D - VL 方向研究
+- 现就读于四川大学
 
 ---
 
 ### ![ =50x50](assets/images/head.png) Elowen 
 - 一名深度学习小白
 - CV 转 LLM 领域
+- 现就读于电子科技大学
 
 
