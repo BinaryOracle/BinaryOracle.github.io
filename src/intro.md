@@ -20,7 +20,6 @@ footer: 探索AI边界，拥抱智能未来
 ---
 
 ### ![ =50x50](assets/images/head.png) Elowen 
-- 一名深度学习小白
 - CV 转 LLM 领域
 - 现就读于电子科技大学
 
