@@ -4,7 +4,7 @@ export default navbar([
   "/",
   "/LLM/",
   "/MMLLM/",
+  "/3DVL/",
  "/open_projects/",
  "/other/",
- "/3DVL/"
 ]);
