@@ -513,6 +513,8 @@ class BertAttention(nn.Module):
 
 ## 预训练
 
+![预训练与微调](图解BERT/22.png)
+
 ### BertPredictionHeadTransform
 
 ![BertPredictionHeadTransform结构图](图解BERT/17.png)
@@ -610,3 +612,363 @@ class BertForPreTraining(BertPreTrainedModel):
 
         return outputs  # (loss), prediction_scores, seq_relationship_score, (hidden_states), (attentions)
 ```
+
+## 其他下游任务
+
+![Bert支持的下游任务图](图解BERT/21.png)
+
+### 问答任务
+
+在 BERT 的问答任务中，典型的输入是一个包含 **问题（Question）** 和 **上下文（Context）** 的文本对。例如：
+
+> **问题**: “谁写了《哈姆雷特》？”  
+> **上下文**: “莎士比亚是英国文学史上最伟大的作家之一，他写了包括《哈姆雷特》、《麦克白》等著名悲剧。”
+
+1. 输入格式（Tokenization 后的形式），在使用 `BertTokenizer` 编码后，输入会变成如下结构：
+
+```json
+[CLS] 问题 tokens [SEP] 上下文 tokens [SEP]
+```
+2. BERT 的输出（Outputs），通过调用 `self.bert(...)`，你将得到一个包含多个元素的 tuple 输出：
+
+```python
+outputs = self.bert(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
+```
+
+返回值形如：
+
+```python
+(
+    sequence_output,          # (batch_size, seq_length, hidden_size)
+    pooled_output,            # (batch_size, hidden_size)
+)
+```
+主要输出项解释:
+
+✅ `sequence_output`: 最终每个 token 的表示
+
+- 形状：`(batch_size, seq_length, hidden_size)`
+- 是模型最后一层所有 token（包括问题和上下文）的隐藏状态。
+- 在问答任务中，我们主要使用它来预测答案的起始和结束位置。
+
+✅ `pooled_output`: 句子级别表示（不常用）
+
+- 形状：`(batch_size, hidden_size)`
+- 是 `[CLS]` token 经过一层全连接后的输出。
+- 在分类任务中更有用，在问答任务中一般不会使用这个输出。
+
+3. 如何利用 BERT 输出做问答预测？
+
+在 `BertForQuestionAnswering` 中，使用了如下逻辑：
+
+```python
+logits = self.qa_outputs(sequence_output)  # (batch_size, seq_length, 2)
+start_logits, end_logits = logits.split(1, dim=-1)  # split into start and end
+start_logits = start_logits.squeeze(-1)  # (batch_size, seq_length)
+end_logits = end_logits.squeeze(-1)
+```
+`qa_outputs` 层的作用：
+- 是一个线性层：`nn.Linear(config.hidden_size, 2)`
+- 将每个 token 的 `hidden_size` 向量映射成两个分数：一个是该 token 作为答案开始的可能性，另一个是作为答案结束的可能性。
+
+输出解释：
+- `start_logits`: 每个 token 是答案起点的得分（未归一化）。
+- `end_logits`: 每个 token 是答案终点的得分。
+
+比如对于一个长度为 128 的序列，每个 token 都有一个对应的 start/end 分数：
+
+```python
+start_scores = torch.softmax(start_logits, dim=-1)  # softmax 得到概率
+end_scores = torch.softmax(end_logits, dim=-1)
+
+# 找出最可能是 start 和 end 的位置
+start_index = torch.argmax(start_scores)
+end_index = torch.argmax(end_scores)
+```
+
+如果 `start_index <= end_index`，那么可以组合这两个索引得到答案 span。
+
+
+#### 代码实现
+
+```python
+class BertForQuestionAnswering(BertPreTrainedModel):
+    def __init__(self, config):
+        super(BertForQuestionAnswering, self).__init__(config)
+        self.num_labels = config.num_labels # 通常是 2，即 start 和 end
+        self.bert = BertModel(config)
+        self.qa_outputs = nn.Linear(config.hidden_size, config.num_labels)
+
+    def forward(self, input_ids, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None,
+                start_positions=None, end_positions=None):
+
+        outputs = self.bert(input_ids,
+                            attention_mask=attention_mask,
+                            token_type_ids=token_type_ids,
+                            position_ids=position_ids)
+
+        sequence_output = outputs[0]
+        # (batch,seq_len,hidden_size) ---> (batch,seq_len,2)
+        logits = self.qa_outputs(sequence_output)
+
+        start_logits, end_logits = logits.split(1, dim=-1)
+        start_logits = start_logits.squeeze(-1) # (batch,seq_len)
+        end_logits = end_logits.squeeze(-1)
+        
+        outputs = (start_logits, end_logits,)
+        # 计算交叉熵损失
+        if start_positions is not None and end_positions is not None:
+            # sometimes the start/end positions are outside our model inputs, we ignore these terms
+            # ignored_index = seq_len
+            ignored_index = start_logits.size(1)
+            # clamp_ 是 PyTorch 中的一个方法，用于将张量中的值限制在指定的范围内。
+            # 它的语法是 tensor.clamp_(min, max) ，表示将张量中的值限制在 min 和 max 之间。
+            # 如果值小于 min ，则将其设置为 min ；如果值大于 max ，则将其设置为 max 。
+            start_positions.clamp_(0, ignored_index)
+            end_positions.clamp_(0, ignored_index)
+
+            # ignore_index: 用于指定在计算损失时忽略的标签索引。 
+            loss_fct = CrossEntropyLoss(ignore_index=ignored_index)
+            # 分别计算答案起始下标和结束下标预测得到的交叉熵损失
+            start_loss = loss_fct(start_logits, start_positions)
+            end_loss = loss_fct(end_logits, end_positions)
+            total_loss = (start_loss + end_loss) / 2
+            outputs = (total_loss,) + outputs
+
+        return outputs  # (loss), start_logits, end_logits
+
+```
+
+#### 易混淆
+
+BERT 是一个 **基于上下文编码（Contextual Encoder）** 的模型，不是自回归生成器。它不会“生成”新的文本，而是对输入文本中每个 token 的角色进行分类（如判断哪个是答案的开始、结束）。所以最终的答案只能来自原始输入文本中的某一段子串。
+
+📚 详细解释
+
+1. ✅ BERT 是一个 Encoder-only 模型
+
+- BERT 只包含 Transformer 的 encoder 部分。
+
+- 它的作用是给定一个完整的句子（或两个句子），对每个 token 生成一个上下文相关的表示（contextualized representation）。
+
+- 它**不具有生成能力**，不能像 GPT 这样的 decoder-only 模型那样逐词生成新内容。
+
+--- 
+
+2. 🔍 QA 任务的本质：定位答案 span 而非生成答案
+
+在 SQuAD 这类抽取式问答任务中：
+
+- 答案必须是原文中的连续片段（span）。
+
+- 所以模型的任务是：
+
+  - 给出问题和上下文；
+
+  - 在上下文中找到最可能的答案起始位置和结束位置；
+
+  - 最终答案就是上下文中这两个位置之间的字符串。
+
+BERT 做的就是这个定位任务，而不是重新生成一个新的答案。
+
+--- 
+
+3. 🧩 输入与输出的关系
+
+```python
+answer_tokens = input_ids[0][start_index : end_index + 1]
+answer = tokenizer.decode(answer_tokens, skip_special_tokens=True)
+```
+
+这段代码的意思是：
+
+- `start_index` 和 `end_index` 是模型预测出的答案的起始和结束位置。
+
+- 我们从原始输入的 `input_ids` 中取出对应的 token ID 子序列。
+
+- 使用 tokenizer 把这些 token ID 解码成自然语言文本。
+
+- 得到的就是答案。
+
+这其实就是在说：
+
+> “根据你的理解，答案应该在这段文字中的第 X 到第 Y 个词之间，请把这部分原文告诉我。”
+
+---
+
+4. 🧪 举个例子
+
+假设原始上下文是：
+
+```
+The capital of France is Paris.
+```
+
+经过 Tokenizer 编码后可能是：
+
+```
+[CLS] the capital of france is paris [SEP]
+```
+如果模型预测 start_index=5，end_index=5，那么对应的就是单词 `"paris"`，这就是答案。
+
+--- 
+
+⚠️ 注意事项
+
+1. **不能超出上下文范围**
+   - start/end positions 必须落在上下文部分（即 token_type_id == 1 的区域）。
+   - 否则答案可能不合理（比如取到了问题部分的内容）。
+
+2. **特殊 token 不计入答案**
+   - `[CLS]`, `[SEP]` 等会被 `skip_special_tokens=True` 自动跳过。
+
+3. **无法处理不在原文中的答案**
+   - 如果正确答案没有出现在上下文中，BERT 无法“编造”出来。
+   - 这是抽取式问答模型的局限性。
+
+---
+
+💡 对比：生成式 vs 抽取式问答
+
+| 类型 | 模型代表 | 是否能生成新文本 | 答案是否必须在原文中 | 示例 |
+|------|----------|------------------|-----------------------|------|
+| 抽取式 | BERT | ❌ | ✅ | 答案是原文中的一段 |
+| 生成式 | T5 / BART / GPT | ✅ | ❌ | 答案可以是任意文本 |
+
+如果你希望模型能“自己写答案”，那就需要使用生成式模型。
+
+---
+
+✅ 总结
+
+| 问题 | 回答 |
+|------|------|
+| 为什么答案来自 `input_ids`？ | 因为 BERT 是编码器模型，只做抽取式问答，答案必须是原文中的一段文本。 |
+| BERT 能不能自己生成答案？ | 不能，BERT 不具备生成能力，只能对输入文本中的 token 做分类。 |
+| 如何获取答案？ | 根据预测的 start/end index，从 `input_ids` 中提取 token，并用 tokenizer 解码成自然语言。 |
+
+
+### Token分类任务
+
+Token 分类任务是指对输入文本中的每个 token 进行分类，常见的应用场景包括：
+
+- 命名实体识别 (NER)
+- 词性标注 (POS)
+- 语义角色标注 (SRL)
+
+```python
+class BertForTokenClassification(BertPreTrainedModel):
+    def __init__(self, config):
+        super(BertForTokenClassification, self).__init__(config)
+        self.num_labels = config.num_labels
+        self.bert = BertModel(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+
+    def forward(self, input_ids, attention_mask=None, token_type_ids=None,
+                position_ids=None, head_mask=None, labels=None):
+
+        outputs = self.bert(input_ids,
+                            attention_mask=attention_mask,
+                            token_type_ids=token_type_ids,
+                            position_ids=position_ids, 
+                            head_mask=head_mask)
+
+        sequence_output = outputs[0] # (batch,seq_len,hidden_size)
+
+        sequence_output = self.dropout(sequence_output)
+        logits = self.classifier(sequence_output) # （batch,seq_len,num_labels）
+
+        outputs = (logits,)
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            # Only keep active parts of the loss
+            if attention_mask is not None:
+                active_loss = attention_mask.view(-1) == 1
+                active_logits = logits.view(-1, self.num_labels)[active_loss]
+                active_labels = labels.view(-1)[active_loss]
+                loss = loss_fct(active_logits, active_labels)
+            else:
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            outputs = (loss,) + outputs
+
+        return outputs  # (loss), scores
+```
+### 多项选择任务
+
+多项选择任务是指给定一个问题和多个候选答案，模型需要从中选择最合适的答案。常见的应用场景包括：
+
+- 阅读理解任务
+
+- 问答系统中的候选答案选择
+
+- 对话系统中的候选回复选择
+
+
+在 多项选择题（Multiple Choice） 任务中，BERT 的输入组织形式与普通分类或问答任务略有不同。你需要为每个选项分别构造一个完整的 BERT 输入序列，并将它们组合成一个批次进行处理。
+
+✅ 假设你有一个问题 + 4 个选项：
+
+```json
+问题：谁写了《哈姆雷特》？
+A. 雨果
+B. 歌德
+C. 莎士比亚
+D. 托尔斯泰
+```
+
+对于这样的多选问题，BERT 的输入方式是：
+
+对每一个选项，都单独构造一个 `[CLS] + 问题 + [SEP] + 选项内容 + [SEP]` 的输入序列。 
+
+也就是说，模型会对每个选项分别编码 ，然后从中选出最合适的那个。
+
+```python
+class BertForMultipleChoice(BertPreTrainedModel):
+    def __init__(self, config):
+        super(BertForMultipleChoice, self).__init__(config)
+        self.bert = BertModel(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, 1)
+
+    def forward(self, input_ids, attention_mask=None, token_type_ids=None,
+                position_ids=None, head_mask=None, labels=None):
+        # 获取选项个数        
+        num_choices = input_ids.shape[1] # (batch_size, num_choices, seq_length)
+        # 将选项展平，以便一起处理: (batch_size * num_choices, seq_length)
+        input_ids = input_ids.view(-1, input_ids.size(-1))
+        attention_mask = attention_mask.view(-1, attention_mask.size(-1)) if attention_mask is not None else None
+        token_type_ids = token_type_ids.view(-1, token_type_ids.size(-1)) if token_type_ids is not None else None
+        position_ids = position_ids.view(-1, position_ids.size(-1)) if position_ids is not None else None
+        
+        outputs = self.bert(input_ids,
+                            attention_mask=attention_mask,
+                            token_type_ids=token_type_ids,
+                            position_ids=position_ids,
+                            head_mask=head_mask)
+
+        pooled_output = outputs[1] # (batch_size * num_choices, hidden_size)
+
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output) # (batch_size * num_choices, 1)
+        reshaped_logits = logits.view(-1, num_choices) # (batch_size , num_choices, 1)
+
+        outputs = (reshaped_logits,)
+       
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(reshaped_logits, labels)
+            outputs = (loss,) + outputs
+
+        return outputs  # (loss), reshaped_logits, (hidden_states), (attentions)
+```
+在前向传播中，会将这些输入展平，变成：
+
+```python
+input_ids.view(-1, seq_length)  # (batch_size * num_choices, seq_length)
+```
+
+这样就能让 BERT 对每个选项分别进行编码。
+
+BERT 输出后，再对每个选项做分类打分，最后重新 reshape 成 (batch_size, num_choices) 形式，用于计算交叉熵损失。
+
