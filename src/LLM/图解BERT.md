@@ -510,3 +510,103 @@ class BertAttention(nn.Module):
         attention_output = self.output(self_outputs, input_tensor)
         return attention_output
 ```
+
+## 预训练
+
+### BertPredictionHeadTransform
+
+![BertPredictionHeadTransform结构图](图解BERT/17.png)
+
+```python
+class BertPredictionHeadTransform(nn.Module):
+    def __init__(self, config):
+        super(BertPredictionHeadTransform, self).__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        if isinstance(config.hidden_act, str) or (sys.version_info[0] == 2 and isinstance(config.hidden_act, unicode)):
+            self.transform_act_fn = ACT2FN[config.hidden_act]
+        else:
+            self.transform_act_fn = config.hidden_act
+        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+    def forward(self, hidden_states):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.transform_act_fn(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states)
+        return hidden_states
+```       
+
+### BertLMPredictionHead
+
+![BertLMPredictionHead结构图](图解BERT/18.png)
+
+```python
+class BertLMPredictionHead(nn.Module):
+    def __init__(self, config):
+        super(BertLMPredictionHead, self).__init__()
+        self.transform = BertPredictionHeadTransform(config)
+
+        # The output weights are the same as the input embeddings, but there is
+        # an output-only bias for each token.
+        self.decoder = nn.Linear(config.hidden_size,
+                                 config.vocab_size,
+                                 bias=False)
+
+        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
+
+    def forward(self, hidden_states):
+        hidden_states = self.transform(hidden_states)
+        hidden_states = self.decoder(hidden_states) + self.bias
+        return hidden_states
+```        
+
+### BertPreTrainingHeads
+
+![BertPreTrainingHeads结构图](图解BERT/19.png)
+
+```python
+class BertPreTrainingHeads(nn.Module):
+    def __init__(self, config):
+        super(BertPreTrainingHeads, self).__init__()
+        self.predictions = BertLMPredictionHead(config)
+        self.seq_relationship = nn.Linear(config.hidden_size, 2)
+
+    def forward(self, sequence_output, pooled_output):
+        prediction_scores = self.predictions(sequence_output) #
+        seq_relationship_score = self.seq_relationship(pooled_output) # 两个句子是否为上下句关系
+        return prediction_scores, seq_relationship_score
+```
+
+### BertForPreTraining
+
+![BertForPreTraining结构图](图解BERT/20.png)
+
+```python
+class BertForPreTraining(BertPreTrainedModel):
+    def __init__(self, config):
+        super(BertForPreTraining, self).__init__(config)
+        self.bert = BertModel(config)
+        self.cls = BertPreTrainingHeads(config)
+
+    def forward(self, input_ids, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None,
+                masked_lm_labels=None, next_sentence_label=None):
+
+        outputs = self.bert(input_ids,
+                            attention_mask=attention_mask,
+                            token_type_ids=token_type_ids,
+                            position_ids=position_ids, 
+                            head_mask=head_mask)
+
+        sequence_output, pooled_output = outputs[:2] # 隐藏层输出,CLS Token Embeddings
+        prediction_scores, seq_relationship_score = self.cls(sequence_output, pooled_output)
+
+        outputs = (prediction_scores, seq_relationship_score,)
+        # 计算掩码语言损失 和 下一个句子预测损失
+        if masked_lm_labels is not None and next_sentence_label is not None:
+            loss_fct = CrossEntropyLoss(ignore_index=-1)
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), masked_lm_labels.view(-1))
+            next_sentence_loss = loss_fct(seq_relationship_score.view(-1, 2), next_sentence_label.view(-1))
+            total_loss = masked_lm_loss + next_sentence_loss
+            outputs = (total_loss,) + outputs
+
+        return outputs  # (loss), prediction_scores, seq_relationship_score, (hidden_states), (attentions)
+```
