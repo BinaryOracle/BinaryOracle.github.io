@@ -4,6 +4,7 @@ category:
   - MMLLM
 tag:
   - 多模态
+  - 已发布
 footer: 探索AI边界，拥抱智能未来
 date: 2025-05-20
 cover: assets/cover/CLIP.png
