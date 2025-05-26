@@ -9,7 +9,7 @@ export default defineUserConfig({
 
   lang: "zh-CN",
   title: "MetaMind",
-  description: "探索AI边界,拥抱智能未来",
+  description: "技术共建，知识共享",
 
   theme,
 
