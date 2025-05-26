@@ -28,7 +28,7 @@ export default hopeTheme({
 
   // 博客相关
   blog: {
-    description: "探索AI边界,拥抱智能未来",
+    description: "技术共建，知识共享",
     intro: "/intro.html",
     medias: {
       csdn: "https://blog.csdn.net/m0_53157173?type=blog",
