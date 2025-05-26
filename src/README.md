@@ -7,7 +7,7 @@ title: 主页
 heroImage: assets/images/head.png
 heroText: MetaMind
 heroFullScreen: true
-tagline: 探索AI边界，拥抱智能未来
+tagline: 技术共建，知识共享
 projects:
   - icon: star
     name: 知识星球
