@@ -38,8 +38,8 @@ projects:
     #link: http://localhost:8080/intro.html
     link: http://binaryoracle.github.io/intro.html
 
-footer: 探索AI边界，拥抱智能未来
+footer: 技术共建，知识共享
 ---
 
 
-知识星球: MetaMind , 小红书: BinaryOracle , CSDN: Binary Oracle
+知识星球: [MetaMind](https://wx.zsxq.com/group/88882821125412) , 小红书: [BinaryOracle](https://www.xiaohongshu.com/user/profile/67eb9f280000000004030302) , CSDN: [Binary Oracle](https://blog.csdn.net/m0_53157173?type=blog)

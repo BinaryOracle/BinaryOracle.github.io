@@ -5,7 +5,7 @@ icon: book
 article: false
 dir:
   order: 1
-footer: 探索AI边界，拥抱智能未来  
+footer: 技术共建，知识共享 
 ---
 
 <Catalog />

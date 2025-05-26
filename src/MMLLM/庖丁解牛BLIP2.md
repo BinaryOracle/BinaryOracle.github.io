@@ -5,7 +5,7 @@ category:
 tag:
   - 多模态
   - 编辑中
-footer: 探索AI边界，拥抱智能未来
+footer: 技术共建，知识共享
 date: 2025-05-25
 cover: assets/cover/BLIP2.png
 author:
