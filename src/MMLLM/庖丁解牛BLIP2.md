@@ -18,3 +18,6 @@ author:
 
 # 庖丁解牛BLIP2
 
+> 论文: [https://arxiv.org/abs/2301.12597](https://arxiv.org/abs/2301.12597)
+> 代码: [https://github.com/salesforce/LAVIS/tree/main/projects/blip2](https://github.com/salesforce/LAVIS/tree/main/projects/blip2)
+
