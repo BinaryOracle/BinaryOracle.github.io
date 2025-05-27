@@ -31,9 +31,13 @@ export default hopeTheme({
     description: "技术共建，知识共享",
     intro: "/intro.html",
     medias: {
-      csdn: "https://blog.csdn.net/m0_53157173?type=blog",
+      XiaoHongShu: "https://www.xiaohongshu.com/user/profile/67eb9f280000000004030302",
       GitHub: "https://github.com/BinaryOracle",
       Gmail: "mailto:info@example.com",
+      // CSDN: {
+      //   icon: "/Users/zhandaohong/vuepress/src/assets/icon/csdn.svg",
+      //   link: "https://blog.csdn.net/m0_53157173",
+      // },
     },
   },
 

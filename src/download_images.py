@@ -4,7 +4,7 @@ import requests
 from urllib.parse import urlparse
 
 # MD文件路径
-md_file_path = '/Users/zhandaohong/vuepress/src/MMLLM/多模态模型CLIP原理与图片分类，文字搜索图像实战演练.md'
+md_file_path = '/Users/zhandaohong/vuepress/src/MMLLM/花卉图片分类实战 -- 基于预训练的 Vision Transformer 实现.md'
 
 # 获取MD文件名并创建子目录
 md_file_name = os.path.splitext(os.path.basename(md_file_path))[0]
