@@ -1,7 +1,7 @@
 ---
 icon: file
 category:
-  - MMLLM
+  - 3D-VL
 tag:
   - 3D-VL
   - 编辑中
