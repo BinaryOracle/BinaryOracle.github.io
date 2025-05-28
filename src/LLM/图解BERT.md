@@ -40,9 +40,9 @@ wget https://storage.googleapis.com/bert_models/2018_11_03/chinese_L-12_H-768_A-
 export BERT_BASE_DIR=/Users/zhandaohong/Read_Bert_Code/chinese_L-12_H-768_A-12
 
 python convert_tf_checkpoint_to_pytorch.py \
-  --tf_checkpoint_path $BERT_BASE_DIR/bert_model.ckpt \
-  --bert_config_file $BERT_BASE_DIR/bert_config.json \
-  --pytorch_dump_path $BERT_BASE_DIR/pytorch_model.bin
+  --tf_checkpoint_path$BERT_BASE_DIR/bert_model.ckpt \
+  --bert_config_file$BERT_BASE_DIR/bert_config.json \
+  --pytorch_dump_path$BERT_BASE_DIR/pytorch_model.bin
 ```
 
 转化成功之后，将模型放入到仓库对应位置：
