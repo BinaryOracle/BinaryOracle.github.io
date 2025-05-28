@@ -113,7 +113,7 @@ L_reg = ||I - A @ A^T||_F^2
 
 ## 代码(Pytorch版本)
 
-![PointNet网络模型结构图](图解PointNet/1.png)
+![PointNet网络模型结构图](简析PointNet/1.png)
 
 ### 输入标准化
 

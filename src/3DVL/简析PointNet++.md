@@ -13,9 +13,9 @@ author:
   - BinaryOracle
 ---
 
-`图解PointNet++` 
+`简析PointNet++` 
 
 <!-- more -->
 
-# 图解PointNet++
+# 简析PointNet++
 
