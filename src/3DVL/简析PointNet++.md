@@ -162,10 +162,11 @@ class PointNetSetAbstraction(nn.Module):
             new_points =  F.relu(bn(conv(new_points))) # [B, out_channel , nsample, npoint]
         
         # 对每个局部区域内所有点的最大响应值进行池化，得到该区域的固定长度特征表示。
+        # 在 new_points 的第 2 个维度（即每个局部邻域内的点数量维度）上做最大池化（max pooling）。
         # 输出形状为 [B, out_channel, nsample]，即每个查询点有一个特征向量。
         new_points = torch.max(new_points, 2)[0]
         new_xyz = new_xyz.permute(0, 2, 1) # [B, C, npoint]
-        return new_xyz, new_points
+        return new_xyz, new_points # 查询点的位置(质心) ， 每个查询点点局部特征。
 ```
 
 sample_and_group 这个函数的作用是从输入点云中：
