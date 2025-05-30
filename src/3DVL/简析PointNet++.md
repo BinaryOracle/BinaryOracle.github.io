@@ -113,61 +113,6 @@ FPS是一种在点云、图像处理或其他数据集中用于抽样的算法�
 
 #### 代码实现
 
-PointNetSetAbstraction（点集抽象层） 是 PointNet++ 中的核心模块 ， 它的作用是负责从输入的点云数据中采样关键点，构建它们的局部邻域区域，并通过一个小型 PointNet 提取这些区域的高维特征，从而实现点云的分层特征学习。
-
-```python
-class PointNetSetAbstraction(nn.Module):
-    def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all):
-        super(PointNetSetAbstraction, self).__init__()
-        self.npoint = npoint # 采样的关键点数量
-        self.radius = radius # 构建局部邻域的半径
-        self.nsample = nsample # 每个邻域内采样的关键点数量
-        self.mlp_convs = nn.ModuleList()
-        self.mlp_bns = nn.ModuleList()
-        last_channel = in_channel # 输入点的特征维度
-        for out_channel in mlp:
-            self.mlp_convs.append(nn.Conv2d(last_channel, out_channel, 1))
-            self.mlp_bns.append(nn.BatchNorm2d(out_channel))
-            last_channel = out_channel
-        self.group_all = group_all
-
-    def forward(self, xyz, points):
-        """
-        Input:
-            xyz: input points position data, [B, C, N]
-            points: input points data, [B, D, N]
-        Return:
-            new_xyz: sampled points position data, [B, C, S]
-            new_points_concat: sample points feature data, [B, D', S]
-        """
-        xyz = xyz.permute(0, 2, 1) # [B, N, C]
-        if points is not None:
-            points = points.permute(0, 2, 1)
-
-        # 如果 group_all=True，则对整个点云做全局特征提取。
-        if self.group_all:
-            new_xyz, new_points = sample_and_group_all(xyz, points)
-        else:  
-        # 否则使用 FPS（最远点采样）选关键点，再用 Ball Query 找出每个点的局部邻近点。    
-            # 参数: 质点数量，采样半径，采样点数量，点坐标，点额外特征
-            new_xyz, new_points = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points)
-        # 局部特征编码（Mini-PointNet）    
-        # new_xyz: sampled points position data, [B, npoint, C]
-        # new_points: sampled points data, [B, npoint, nsample, C+D]
-        # 把邻域点的数据整理成适合卷积的格式 [B, C+D, nsample, npoint]
-        new_points = new_points.permute(0, 3, 2, 1)
-        # 使用多个 Conv2d + BatchNorm + ReLU 层提取特征
-        for i, conv in enumerate(self.mlp_convs):
-            bn = self.mlp_bns[i]
-            new_points =  F.relu(bn(conv(new_points))) # [B, out_channel , nsample, npoint]
-        
-        # 对每个局部区域内所有点的最大响应值进行池化，得到该区域的固定长度特征表示。
-        # 在 new_points 的第 2 个维度（即每个局部邻域内的点数量维度）上做最大池化（max pooling）。
-        # 输出形状为 [B, out_channel, nsample]，即每个查询点有一个特征向量。
-        new_points = torch.max(new_points, 2)[0]
-        new_xyz = new_xyz.permute(0, 2, 1) # [B, C, npoint]
-        return new_xyz, new_points # 查询点的位置(质心) ， 每个查询点点局部特征。
-```
 sample_and_group 这个函数的作用是从输入点云中：
 - 采样一些关键点
 - 为每个关键点构建局部邻域（局部区域）
@@ -304,6 +249,9 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
     group_idx[mask] = group_first[mask]
     return group_idx # （batch,npoint,nsample)
 ```
+
+![sample_and_group流程图](简析PointNet++/2.png)
+
 sample_and_group_all 函数的作用是将整个点云视为一个“大局部区域”，不进行采样，直接对所有点进行特征提取，用于 PointNet++ 中的全局特征学习。 
 
 ```python
@@ -331,6 +279,65 @@ def sample_and_group_all(xyz, points):
         new_points = grouped_xyz
     return new_xyz, new_points # 全局质心点（0 位置）, 所有点组成的局部区域
 ```
+![sample_and_group_all流程图](简析PointNet++/3.png)
+
+PointNetSetAbstraction（点集抽象层） 是 PointNet++ 中的核心模块 ， 它的作用是负责从输入的点云数据中采样关键点，构建它们的局部邻域区域，并通过一个小型 PointNet 提取这些区域的高维特征，从而实现点云的分层特征学习。
+
+```python
+class PointNetSetAbstraction(nn.Module):
+    def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all):
+        super(PointNetSetAbstraction, self).__init__()
+        self.npoint = npoint # 采样的关键点数量
+        self.radius = radius # 构建局部邻域的半径
+        self.nsample = nsample # 每个邻域内采样的关键点数量
+        self.mlp_convs = nn.ModuleList()
+        self.mlp_bns = nn.ModuleList()
+        last_channel = in_channel # 输入点的特征维度
+        for out_channel in mlp:
+            self.mlp_convs.append(nn.Conv2d(last_channel, out_channel, 1))
+            self.mlp_bns.append(nn.BatchNorm2d(out_channel))
+            last_channel = out_channel
+        self.group_all = group_all
+
+    def forward(self, xyz, points):
+        """
+        Input:
+            xyz: input points position data, [B, C, N]
+            points: input points data, [B, D, N]
+        Return:
+            new_xyz: sampled points position data, [B, C, S]
+            new_points_concat: sample points feature data, [B, D', S]
+        """
+        xyz = xyz.permute(0, 2, 1) # [B, N, C]
+        if points is not None:
+            points = points.permute(0, 2, 1)
+
+        # 如果 group_all=True，则对整个点云做全局特征提取。
+        if self.group_all:
+            new_xyz, new_points = sample_and_group_all(xyz, points)
+        else:  
+        # 否则使用 FPS（最远点采样）选关键点，再用 Ball Query 找出每个点的局部邻近点。    
+            # 参数: 质点数量，采样半径，采样点数量，点坐标，点额外特征
+            new_xyz, new_points = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points)
+        # 局部特征编码（Mini-PointNet）    
+        # new_xyz: sampled points position data, [B, npoint, C]
+        # new_points: sampled points data, [B, npoint, nsample, C+D]
+        # 把邻域点的数据整理成适合卷积的格式 [B, C+D, nsample, npoint]
+        new_points = new_points.permute(0, 3, 2, 1)
+        # 使用多个 Conv2d + BatchNorm + ReLU 层提取特征
+        for i, conv in enumerate(self.mlp_convs):
+            bn = self.mlp_bns[i]
+            new_points =  F.relu(bn(conv(new_points))) # [B, out_channel , nsample, npoint]
+        
+        # 对每个局部区域内所有点的最大响应值进行池化，得到该区域的固定长度特征表示。
+        # 在 new_points 的第 2 个维度（即每个局部邻域内的点数量维度）上做最大池化（max pooling）。
+        # 输出形状为 [B, out_channel, npoint]，即每个查询点有一个特征向量。
+        new_points = torch.max(new_points, 2)[0] # [B, out_channel, npoint]
+        new_xyz = new_xyz.permute(0, 2, 1) # [B, C, npoint]
+        return new_xyz, new_points # 查询点的位置(质心) ， 每个查询点点局部特征。
+```
+最终每个采样得到的关键点所在的局部领域，都会被压缩为一个固定长度的特征向量。这个特征向量代表了这个局部区域的高维特征，它包含了这个区域内所有点的信息。
+
 
 ### 单尺度分组分类模型
 
@@ -379,6 +386,8 @@ class get_model(nn.Module):
 
         return x, l3_points
  ```
+完整的单尺度分组分类流程如下图所示:
+
 
 
  
