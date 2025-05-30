@@ -386,7 +386,21 @@ class get_model(nn.Module):
 
         return x, l3_points
  ```
-完整的单尺度分组分类流程如下图所示:
+完整的单尺度分组分类流程为:
+- 原始点云数据，首次sample，grouping，mini-PointNet后，得到:
+     -  512 个关键点的坐标
+     -  512 个关键点对应的局部区域特征向量
+
+- 二次sample，grouping，mini-PointNet后，得到:
+     -  128 个关键点的坐标
+     -  128 个关键点对应的局部区域特征向量
+
+- 三次sample，grouping，mini-PointNet后，得到:
+     -  1 个关键点的坐标
+     -  1 个关键点对应的全局区域特征向量 
+
+- 获取全局区域特征向量后，通过全连接层进行分类。
+
 
 
 
