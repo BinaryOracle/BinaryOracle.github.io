@@ -168,7 +168,6 @@ class PointNetSetAbstraction(nn.Module):
         new_xyz = new_xyz.permute(0, 2, 1) # [B, C, npoint]
         return new_xyz, new_points # 查询点的位置(质心) ， 每个查询点点局部特征。
 ```
-
 sample_and_group 这个函数的作用是从输入点云中：
 - 采样一些关键点
 - 为每个关键点构建局部邻域（局部区域）
@@ -305,4 +304,81 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
     group_idx[mask] = group_first[mask]
     return group_idx # （batch,npoint,nsample)
 ```
+sample_and_group_all 函数的作用是将整个点云视为一个“大局部区域”，不进行采样，直接对所有点进行特征提取，用于 PointNet++ 中的全局特征学习。 
 
+```python
+def sample_and_group_all(xyz, points):
+    """
+    Input:
+        xyz: input points position data, [B, N, 3], 点云坐标数据
+        points: input points data, [B, N, D], 点云的额外特征（如法线、颜色等）
+    Return:
+        new_xyz: sampled points position data, [B, 1, 3]
+        new_points: sampled points data, [B, 1, N, 3+D]
+    """
+    device = xyz.device
+    B, N, C = xyz.shape
+    # 创建一个全零点作为“质心”
+    # 虽然这个点没有实际意义，但它是为了统一接口设计的一个占位符
+    new_xyz = torch.zeros(B, 1, C).to(device)
+    # 把原始点云 reshape 成一个大的局部区域
+    grouped_xyz = xyz.view(B, 1, N, C)
+    # 如果有额外特征（比如法线、颜色），也一并加入
+    if points is not None:
+        # 终输出的 new_points 是 [B, 1, N, 3+D]，代表每个 batch 中只有一组“大区域”的点及其特征
+        new_points = torch.cat([grouped_xyz, points.view(B, 1, N, -1)], dim=-1)
+    else:    
+        new_points = grouped_xyz
+    return new_xyz, new_points # 全局质心点（0 位置）, 所有点组成的局部区域
+```
+
+### 单尺度分组分类模型
+
+ PointNet++ 的 单尺度分组（SSG）架构 ，通过多层 Set Abstraction 提取点云的层次化特征，并最终输出分类结果。
+
+ > Single-Scale Grouping (SSG)
+
+代码实现如下:
+
+ ```python
+# pointnet2_cls_ssg.py 
+class get_model(nn.Module):
+    # num_class: 输出类别数
+    # normal_channel: 是否包含法线信息（默认有 (x,y,z,nx,ny,nz)，否则只有 (x,y,z)）
+    def __init__(self,num_class,normal_channel=True):
+        super(get_model, self).__init__()
+        in_channel = 6 if normal_channel else 3
+        self.normal_channel = normal_channel
+        # PointNet++ 的核心就是逐层提取局部特征。这里的三个 SA 层构成了一个 三层分层特征学习结构 ：
+        self.sa1 = PointNetSetAbstraction(npoint=512, radius=0.2, nsample=32, in_channel=in_channel, mlp=[64, 64, 128], group_all=False)
+        self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.4, nsample=64, in_channel=128 + 3, mlp=[128, 128, 256], group_all=False)
+        self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, in_channel=256 + 3, mlp=[256, 512, 1024], group_all=True)
+        self.fc1 = nn.Linear(1024, 512)
+        self.bn1 = nn.BatchNorm1d(512)
+        self.drop1 = nn.Dropout(0.4)
+        self.fc2 = nn.Linear(512, 256)
+        self.bn2 = nn.BatchNorm1d(256)
+        self.drop2 = nn.Dropout(0.4)
+        self.fc3 = nn.Linear(256, num_class)
+
+    def forward(self, xyz):
+        B, _, _ = xyz.shape
+        if self.normal_channel:
+            norm = xyz[:, 3:, :]
+            xyz = xyz[:, :3, :]
+        else:
+            norm = None
+        l1_xyz, l1_points = self.sa1(xyz, norm)
+        l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
+        l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)
+        x = l3_points.view(B, 1024)
+        x = self.drop1(F.relu(self.bn1(self.fc1(x))))
+        x = self.drop2(F.relu(self.bn2(self.fc2(x))))
+        x = self.fc3(x)
+        x = F.log_softmax(x, -1)
+
+        return x, l3_points
+ ```
+
+
+ 
