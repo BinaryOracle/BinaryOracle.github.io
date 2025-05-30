@@ -7,7 +7,7 @@ tag:
   - point cloud
   - 已发布
 footer: 技术共建，知识共享
-date: 2025-05-25
+date: 2025-05-28
 cover: assets/cover/PointNet++.png
 author:
   - BinaryOracle
