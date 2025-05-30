@@ -5,7 +5,7 @@ category:
 tag:
   - 3D-VL
   - point cloud
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-05-25
 cover: assets/cover/PointNet++.png
@@ -401,7 +401,153 @@ class get_model(nn.Module):
 
 - 获取全局区域特征向量后，通过全连接层进行分类。
 
+## 非均匀密度下稳定的特征学习
+
+由于点集在不同区域可能会有不同的采样密度，这种非均匀性为点集特征学习带来了显著挑战。在密集采样的区域中学到的特征可能无法很好地泛化到稀疏采样的区域，反之亦然。因此，为了解决这一问题，PointNet++提出了密度自适应PointNet层，包含两种适应性特征学习层：多尺度分组（Multi-Scale Grouping, MSG）和多分辨率分组（Multi-Resolution Grouping, MRG）。
+
+### 多尺度分组 （Multi-Scale Grouping）
+
+MSG通过应用不同尺度的分组层（**按照不同的搜索半径或领域大小对点集进行分组**），然后通过对应的PointNets提取每个尺度上的特征来捕获多尺度模式。不同尺度的特征被串联形成多尺度特征向量。这种方法使网络能够通过在训练期间随机丢弃输入点（称为随机输入丢弃 - random input dropout）来学习优化的策略，以结合来自不同尺度的特征。这样，网络在训练时被呈现了不同稀疏度的点集，从而学会根据输入数据的变化自适应地加权不同尺度上检测到的模式。
+
+![多尺度分组](简析PointNet++/4.png)
+
+具体来说，在MSG中，网络对于每个选定的形心点，按照几个预定义的半径值来搜索周围的邻近点。每个半径定义了一个局部邻域的大小，因此每个质心将根据这些不同的半径值与其周围点形成多个点集群。这样，对于每个质心点，网络不是只捕获一个尺度上的局部特征，而是能够捕获多个尺度上的局部特征。
+
+每个尺度（或每组邻域大小）的点集群都将独立地送入对应的PointNet网络进行特征提取，之后这些不同尺度上提取的特征被串联起来，形成一个综合的多尺度特征表示。这种方法使得网络能够在细节丰富的区域（通过较小的邻域尺度捕获细节）和稀疏采样的区域（通过较大的邻域尺度避免过度稀疏的问题）中均能有效提取特征。
+
+##### 多尺度分组分类模型
+
+PointNetSetAbstractionMsg 这个模块实现了 PointNet++ 中的 多尺度特征提取机制 ：对于每个局部区域，使用多个不同大小的邻域球（multi-scale ball query），分别提取特征，然后将这些不同尺度的特征拼接在一起，以获得更强的局部几何感知能力。 
+
+```python
+class PointNetSetAbstractionMsg(nn.Module):
+    def __init__(self, npoint, radius_list, nsample_list, in_channel, mlp_list):
+        super(PointNetSetAbstractionMsg, self).__init__()
+        self.npoint = npoint # 要采样的质心点数量
+        self.radius_list = radius_list # 不同尺度的查询半径列表
+        self.nsample_list = nsample_list # 对应半径下最多取多少邻近点
+        self.conv_blocks = nn.ModuleList() 
+        self.bn_blocks = nn.ModuleList()
+        # 为每个尺度构建一个独立的小型 PointNet（Conv2d + BN + ReLU）
+        # 每个尺度可以有不同的网络深度和宽度
+        # 所有尺度的网络并行运行，最后拼接结果
+        for i in range(len(mlp_list)):
+            convs = nn.ModuleList()
+            bns = nn.ModuleList()
+            last_channel = in_channel + 3
+            for out_channel in mlp_list[i]:
+                convs.append(nn.Conv2d(last_channel, out_channel, 1))
+                bns.append(nn.BatchNorm2d(out_channel))
+                last_channel = out_channel
+            self.conv_blocks.append(convs)
+            self.bn_blocks.append(bns)
+
+    def forward(self, xyz, points):
+        """
+        Input:
+            xyz: input points position data, [B, C, N]
+            points: input points data, [B, D, N]
+        Return:
+            new_xyz: sampled points position data, [B, C, S]
+            new_points_concat: sample points feature data, [B, D', S]
+        """
+        xyz = xyz.permute(0, 2, 1) # [B, N, C]
+        if points is not None:
+            points = points.permute(0, 2, 1)
+
+        B, N, C = xyz.shape
+        S = self.npoint
+        # 使用 FPS（最远点采样）选出 S 个关键点作为局部区域中心
+        new_xyz = index_points(xyz, farthest_point_sample(xyz, S))
+        new_points_list = []
+        for i, radius in enumerate(self.radius_list):
+            K = self.nsample_list[i]
+            # 对每个半径 radius，找出该尺度下每个质心点周围的邻近点
+            group_idx = query_ball_point(radius, K, xyz, new_xyz)
+            grouped_xyz = index_points(xyz, group_idx)
+            # 把这些点的坐标归一化到以质心为中心的局部坐标系下
+            grouped_xyz -= new_xyz.view(B, S, 1, C)
+            # 如果有额外特征，也一并加入
+            if points is not None:
+                grouped_points = index_points(points, group_idx)
+                grouped_points = torch.cat([grouped_points, grouped_xyz], dim=-1)
+            else:
+                grouped_points = grouped_xyz
+            
+            # 对每个尺度的局部点集应用对应的 Conv2d + BN + ReLU
+            grouped_points = grouped_points.permute(0, 3, 2, 1)  # [B, D, K, S]
+            for j in range(len(self.conv_blocks[i])):
+                conv = self.conv_blocks[i][j]
+                bn = self.bn_blocks[i][j]
+                grouped_points =  F.relu(bn(conv(grouped_points)))
+            # 使用最大池化聚合局部信息，生成固定长度的特征向量    
+            new_points = torch.max(grouped_points, 2)[0]  # [B, D', S]
+            # 所有尺度的特征保存到 new_points_list
+            new_points_list.append(new_points)
+        
+        new_xyz = new_xyz.permute(0, 2, 1)
+        # 把不同尺度学到的特征拼接在一起，形成最终的局部特征表示
+        new_points_concat = torch.cat(new_points_list, dim=1) 
+        # 最终输出就是： 一组新的关键点位置； 每个关键点的多尺度特征表示
+        return new_xyz, new_points_concat
+```
+
+pointnet2_cls_msg 这个模型使用了 PointNet++ 的 多尺度分组（MSG）策略 ，通过多个局部区域球查询提取不同尺度的局部特征，逐层抽象后融合成全局特征，最后通过全连接层完成分类任务。
+
+```python
+# pointnet2_cls_msg.py
+class get_model(nn.Module):
+    def __init__(self,num_class,normal_channel=True):
+        super(get_model, self).__init__()
+        in_channel = 3 if normal_channel else 0
+        self.normal_channel = normal_channel
+        self.sa1 = PointNetSetAbstractionMsg(512, [0.1, 0.2, 0.4], [16, 32, 128], in_channel,[[32, 32, 64], [64, 64, 128], [64, 96, 128]])
+        self.sa2 = PointNetSetAbstractionMsg(128, [0.2, 0.4, 0.8], [32, 64, 128], 320,[[64, 64, 128], [128, 128, 256], [128, 128, 256]])
+        self.sa3 = PointNetSetAbstraction(None, None, None, 640 + 3, [256, 512, 1024], True)
+        self.fc1 = nn.Linear(1024, 512)
+        self.bn1 = nn.BatchNorm1d(512)
+        self.drop1 = nn.Dropout(0.4)
+        self.fc2 = nn.Linear(512, 256)
+        self.bn2 = nn.BatchNorm1d(256)
+        self.drop2 = nn.Dropout(0.5)
+        self.fc3 = nn.Linear(256, num_class)
+
+    def forward(self, xyz):
+        B, _, _ = xyz.shape
+        if self.normal_channel:
+            norm = xyz[:, 3:, :]
+            xyz = xyz[:, :3, :]
+        else:
+            norm = None
+        l1_xyz, l1_points = self.sa1(xyz, norm)
+        l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
+        l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)
+        x = l3_points.view(B, 1024)
+        x = self.drop1(F.relu(self.bn1(self.fc1(x))))
+        x = self.drop2(F.relu(self.bn2(self.fc2(x))))
+        x = self.fc3(x)
+        x = F.log_softmax(x, -1)
 
 
+        return x,l3_points
+```
 
- 
+MSG的关键优点在于它通过在训练期间的随机输入丢弃（即随机移除一部分输入点）来模拟不同的采样密度，从而训练网络在面对实际应用中可能遇到的各种采样密度时，能够自适应地选择最适合的特征尺度进行组合，以实现最佳的性能。这种方法大大增强了网络处理非均匀采样数据的能力，提高了模型的泛化性和稳健性。
+
+> 在训练时引入不同密度的点集情况，使网络能学习不同采样密度下局部点云特征的提取，捕获密集到稀疏采样区域内的多尺度信息 -- 通过随机丢弃来模拟不同密度的采样，使网络能够应对实际中各种密度变换的情况-提高模型的泛化性能。
+
+MSG相当于并联了多个hierarchical structure，每个结构中心点不变，但是尺度不同。通过PointNet获取每个形心多尺度信息，之后concat形成该区域提取的总特征。在训练时引入随机丢弃形心来模拟不同密度情况，提高算法鲁棒性。
+
+ #### 多分辨率分组（Multi-Resolution Grouping）
+
+MSG方法虽然有效，但在计算上可能非常昂贵，尤其是在低层次上对每个质心点运行局部PointNet时。为此，MRG为一种低成本的替代方案。
+
+MRG通过结合来自不同分辨率的特征来实现效率和适应性的平衡。具体而言，MRG策略在处理每个局部区域时，不仅考虑从当前分辨率下抽象得到的特征，还考虑了从更低分辨率（即上一层级）直接提取的特征。这两种特征被concat为一个复合特征向量，为后续的处理步骤提供信息。
+
+![多分辨率分组](简析PointNet++/5.png)
+
+在MRG中，某一层次𝐿𝑖的区域特征是通过将来自下一级𝐿𝑖−1的子区域特征总结后的向量与直接处理该局部区域所有原始点的单个PointNet得到的特征向量进行concat得到的。当局部区域的密度较低时，由于子区域在计算第一个向量时包含的点更稀疏，因此可能比第二个向量更不可靠。在这种情况下，应该更高地加权第二个向量。相反，当局部区域的密度较高时，第一个向量提供了更细致的信息，因为它能够在更低层次上递归地检视更高分辨率。
+
+> 来自下一级的特征：首先，将来自下一级（更高分辨率）的特征进行汇总，形成一个特征向量。这一过程通过对每个子区域应用集合抽象层（set abstraction level）完成。
+
+> 直接处理的原始点特征：另一部分特征是通过在当前分辨率直接对所有原始点应用单个PointNet得到的。
