@@ -154,6 +154,9 @@ image_feats 中每个 image_feat 与 text_feat 计算一个 similarity score ，
 
 ![similarity score](庖丁解牛BLIP2/5.png)
 
+如何计算loss的: “in-batch negatives”，该方法正是CLIP在VLP领域发扬光大的。以下引用CLIP论文图做说明：
+
+![in-batch negatives](庖丁解牛BLIP2/6.png)
 
 ```python
 ###============== Image-text Contrastive ===================###
@@ -190,6 +193,7 @@ image_feats 中每个 image_feat 与 text_feat 计算一个 similarity score ，
             F.cross_entropy(sim_i2t, targets, label_smoothing=0.1) + F.cross_entropy(sim_t2i, targets, label_smoothing=0.1)
         ) / 2
 ```
+
 
 
 BertLayer 核心代码实现如下:
