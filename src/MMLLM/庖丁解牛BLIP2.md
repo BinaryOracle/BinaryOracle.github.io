@@ -186,6 +186,7 @@ image_feats 中每个 image_feat 与 text_feat 计算一个 similarity score ，
 
         # 计算 图文对比 Loss             
         loss_itc = (
+            # sim_i2t 形状是 (B, B)，每一行表示一张图像和所有文本之间的相似度。
             F.cross_entropy(sim_i2t, targets, label_smoothing=0.1) + F.cross_entropy(sim_t2i, targets, label_smoothing=0.1)
         ) / 2
 ```
