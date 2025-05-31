@@ -135,6 +135,9 @@ class Blip2Qformer(Blip2Base):
         )
         ...
 ```
+
+> 以上代码注释中统一用B代替image_batch和text_batch，以及seq_len和hidden_size也是同样处理手段，大家注意区分。
+
 为了训练好Q-Former，第一阶段设计了三个训练目标，分别如下:
 
 1、Image-Text Contrastive Learning (ITC Loss, CLIP-like)
