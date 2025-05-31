@@ -51,10 +51,100 @@ BLIP-2 基于 BLIP 架构，利用已有的ViT 和 LLM（均冻结）+ 一个的
 
 BLIP-2 框架按照 Two-Stage 策略预训练轻量级查询 Transformer 以弥合模态差距。
 
-Stage 1: 不同模态数据的提取与融合。       Stage 2: 把数据转换成LLM能识别的格式。
+Stage 1: 不同模态数据的提取与融合。       
+
+Stage 2: 把数据转换成LLM能识别的格式。
 
 ![Two-Stage流程](庖丁解牛BLIP2/2.png)
 
-从冻结的Image Encoder引到Vision-Language表征学习。   从冻结的LLM引到Vision-Language生成学习，实现Zero Shot图文生成。
+从冻结的Image Encoder引到Vision-Language表征学习。   
 
+从冻结的LLM引到Vision-Language生成学习，实现Zero Shot图文生成。
 
+### Stage 1: Representation Learning （表征学习）
+
+![tage 1: Representation Learning （表征学习）](庖丁解牛BLIP2/3.png)
+
+Q-Former 由两个transformer模块组成，输入包含三部分：
+
+1. 冻结参数的Image Encoder提取的图像embeddings
+2. Learned Queries
+
+>  - Queries是一组可学习的embeddings，是第一个transformer模块的input，可认为是模型参数一部分
+>  - 推理时，Queries被用来从image encoder输出的embeddings里提取与input text最相关的视觉信息
+
+3. Input Text
+
+Stage 1 使用 图像-文本对 进行预训练，目标是训练好 Q-Former，**以便 Queries 可以学习到如何更好地结合文本提取图片信息**。
+
+对于Q-Former，一种比较好理解的方式：把Q-Former类比为一个Self-attention模块
+
+- Q：learned queries
+- K：input text
+- V：image embeddings from Image Encoder
+
+```python
+class Blip2Qformer(Blip2Base):
+    ...    
+   
+    def forward(self, samples):
+        image = samples["image"]
+        text = samples["text_input"]
+        # (2,257,1408) --> attn: (2,257) ，(batch_size , seq_len , hidden_size)
+        image_embeds = self.ln_vision(self.visual_encoder(image))
+        image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(
+            image.device
+        )
+        # (1,32,768) --> (2,32,768) --> 共享内存
+        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
+
+        query_output = self.Qformer.bert(
+            query_embeds=query_tokens,
+            encoder_hidden_states=image_embeds,
+            encoder_attention_mask=image_atts,
+            use_cache=True,
+            return_dict=True,
+        )
+        #  BertEncoder 的 squence_output
+        image_feats = F.normalize(
+            self.vision_proj(query_output.last_hidden_state), dim=-1
+        )
+
+        text_tokens = self.tokenizer(
+            text,
+            padding="max_length",
+            truncation=True,
+            max_length=self.max_txt_len,
+            return_tensors="pt",
+        ).to(image.device)
+        text_output = self.Qformer.bert(
+            text_tokens.input_ids,
+            attention_mask=text_tokens.attention_mask, # padding mask
+            return_dict=True,
+        )
+        text_feat = F.normalize( # 取CLS TOKEN ？
+            self.text_proj(text_output.last_hidden_state[:, 0, :]), dim=-1
+        )
+
+        ###============== Image-text Contrastive ===================###
+        ...                   
+        loss_itc = (
+            F.cross_entropy(sim_i2t, targets, label_smoothing=0.1)
+            + F.cross_entropy(sim_t2i, targets, label_smoothing=0.1)
+        ) / 2
+
+        ###============== Image-text Matching ===================###
+        ...
+        loss_itm = F.cross_entropy(logits, itm_labels)
+
+        ##================= Image Captioning ========================##
+        ...
+        loss_lm = lm_output.loss
+
+        return BlipOutput(
+            loss=loss_itc + loss_itm + loss_lm,
+            loss_itc=loss_itc,
+            loss_itm=loss_itm,
+            loss_lm=loss_lm,
+        )
+```
