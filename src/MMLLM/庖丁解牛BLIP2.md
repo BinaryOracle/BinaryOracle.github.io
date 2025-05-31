@@ -47,4 +47,14 @@ author:
 
 BLIP-2 基于 BLIP 架构，利用已有的ViT 和 LLM（均冻结）+ 一个的轻量Q-Former模块做模态融合，大幅降低训练成本。具有很强的zero-shot image-to-text generation能力，同时因LLM而具有了视觉推理能力。
 
+## 模型结构
+
+BLIP-2 框架按照 Two-Stage 策略预训练轻量级查询 Transformer 以弥合模态差距。
+
+Stage 1: 不同模态数据的提取与融合。       Stage 2: 把数据转换成LLM能识别的格式。
+
+![Two-Stage流程](庖丁解牛BLIP2/2.png)
+
+从冻结的Image Encoder引到Vision-Language表征学习。   从冻结的LLM引到Vision-Language生成学习，实现Zero Shot图文生成。
+
 
