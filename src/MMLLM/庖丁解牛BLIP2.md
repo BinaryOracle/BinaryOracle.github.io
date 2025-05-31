@@ -51,10 +51,28 @@ BLIP-2 基于 BLIP 架构，利用已有的ViT 和 LLM（均冻结）+ 一个的
 
 BLIP-2 框架按照 Two-Stage 策略预训练轻量级查询 Transformer 以弥合模态差距。
 
-Stage 1: 不同模态数据的提取与融合。       Stage 2: 把数据转换成LLM能识别的格式。
+Stage 1: 不同模态数据的提取与融合。       
+
+Stage 2: 把数据转换成LLM能识别的格式。
 
 ![Two-Stage流程](庖丁解牛BLIP2/2.png)
 
-从冻结的Image Encoder引到Vision-Language表征学习。   从冻结的LLM引到Vision-Language生成学习，实现Zero Shot图文生成。
+从冻结的Image Encoder引到Vision-Language表征学习。   
+
+从冻结的LLM引到Vision-Language生成学习，实现Zero Shot图文生成。
+
+### Stage 1: Representation Learning （表征学习）
+
+![tage 1: Representation Learning （表征学习）](庖丁解牛BLIP2/3.png)
+
+Q-Former 由两个transformer模块组成，输入包含三部分：
+
+1. 冻结参数的Image Encoder提取的图像embeddings
+2. Learned Queries
+
+>  - Queries是一组可学习的embeddings，是第一个transformer模块的input，可认为是模型参数一部分
+>  - 推理时，Queries被用来从image encoder输出的embeddings里提取与input text最相关的视觉信息
+
+3. Input Text
 
 
