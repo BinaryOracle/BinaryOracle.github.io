@@ -140,7 +140,7 @@ class Blip2Qformer(Blip2Base):
 
 为了训练好Q-Former，第一阶段设计了三个训练目标，分别如下:
 
-1、Image-Text Contrastive Learning (ITC Loss, CLIP-like)
+#### 1、Image-Text Contrastive Learning (ITC Loss, CLIP-like)
 
 > 目的: Image representation 与 Text representation，以最大化互信息
 >
@@ -193,7 +193,19 @@ image_feats 中每个 image_feat 与 text_feat 计算一个 similarity score ，
             F.cross_entropy(sim_i2t, targets, label_smoothing=0.1) + F.cross_entropy(sim_t2i, targets, label_smoothing=0.1)
         ) / 2
 ```
+#### 2、Image-Text Matching (ITM Loss，二分类task)
 
+> 目的：通过学习image-text pair是否match，以细粒度对齐 Image representation 与 Text representation
+>
+> 自注意力掩码策略: Bi-directional Self-attention Mask（双向自注意力）
+>
+> Queries 和Text都能和所有的tokens 做attention
+> ![Bi-directional Self-attention Mask](庖丁解牛BLIP2/7.png)
+
+
+每个output query embedding送到二分类器中，得到一个logit；所有logits的平均作为最终的matching score:
+
+![matching score](庖丁解牛BLIP2/8.png)
 
 
 BertLayer 核心代码实现如下:
