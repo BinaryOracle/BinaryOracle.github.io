@@ -335,7 +335,22 @@ class BertEmbeddings(nn.Module):
 ```
 下图展示了 Image-Text Matching 的完整计算流程，关于BertModel的代码解析部分，将会在下文进行详细讲解:
 
-![庖丁解牛BLIP2](庖丁解牛BLIP2/9.png)
+![Image-Text Matching](庖丁解牛BLIP2/9.png)
+
+#### 3、Image-Grounded Text Generation (ITG Loss, GPT-like)
+
+> - 目的：让Q-Former学习“图生文”的能力，即给定Input Image，生成Text
+>
+> - 自注意力掩码策略：Multimodal Causal Self-attention Mask（多模态因果自监督）
+>
+> - Queies 可以和所有自己的tokens做attention
+>
+> - Text 可以和所有的query tokens 及 当前token之前的text tokens做attention
+> 
+> ![Multimodal Causal Self-attention Mask](庖丁解牛BLIP2/10.png)
+
+
+
 
 
 
