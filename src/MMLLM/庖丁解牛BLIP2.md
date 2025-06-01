@@ -4,7 +4,7 @@ category:
   - MMLLM
 tag:
   - 多模态
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-05-25
 cover: assets/cover/BLIP2.png
@@ -675,5 +675,77 @@ Stage 2 是为了把 Q-Former 和冻结参数的 LLM 连接起来，以利用 LL
 
 3. 后将投影后的 $Z$ 添加到 input text embeddings前面，Queries 的输出蕴含了视觉信息，送入LLM时，充当了soft visual prompts 。
 
-4. 由于 Q-Former 已经过预训练以提取语言信息视觉表示，因此它有效地充当信息瓶颈，将最有用的信息提供给 LLM，同时删除不相关的视觉信息。这减少了LLM学习视觉语言对齐的负担，从而缓解了灾难性的遗忘问题。
+> 由于 Q-Former 已经过预训练以提取语言信息视觉表示，因此它有效地充当信息瓶颈，将最有用的信息提供给 LLM，同时删除不相关的视觉信息。这减少了LLM学习视觉语言对齐的负担，从而缓解了灾难性的遗忘问题。
+
+	
+Blip2Qformer 的generate方法负责完成图像描述生成（图文到文本）:
+
+```python
+class Blip2Qformer(Blip2Base):
+    ...
+    def generate(
+        self,
+        samples,                   # 输入样本，包含图像和可选文本
+        use_nucleus_sampling=False, # 是否使用核采样（top-p采样）
+        num_beams=3,               # beam search的beam数量
+        max_length=30,             # 生成文本的最大长度
+        min_length=10,             # 生成文本的最小长度
+        top_p=0.9,                 # 核采样的概率阈值
+        repetition_penalty=1.0,    # 重复惩罚系数
+    ):
+        # 1. 图像编码阶段
+        image = samples["image"]
+        # 通过视觉编码器（如ViT）提取图像特征 (B, 257, D)
+        image_embeds = self.ln_vision(self.visual_encoder(image))  
+
+        # 2. 处理beam search扩展
+        if not use_nucleus_sampling:
+            # 如果是beam search，需要复制图像特征以匹配beam数量
+            # (B, 257, D) -> (B*num_beams, 257, D)
+            image_embeds = image_embeds.repeat_interleave(num_beams, dim=0)
+        else:
+            # 核采样时不扩展beam
+            num_beams = 1
+
+        # 创建图像注意力掩码（全1，表示所有图像token有效）
+        image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(
+            image.device
+        )
+
+        # 3. 准备生成参数
+        model_kwargs = {
+            "encoder_hidden_states": image_embeds,  # 图像特征作为cross-attention的输入
+            "encoder_attention_mask": image_atts,   # 图像注意力掩码
+        }
+
+        # 4. 初始化文本输入（以BOS token开头）
+        # 形状: (batch_size, 1)，初始为[BOS]
+        input_ids = (
+            torch.LongTensor(image.size(0), 1)
+            .fill_(self.tokenizer.bos_token_id)
+            .to(image.device)
+        )
+
+        # 5. 扩展可学习的query tokens
+        # query_tokens形状: (batch_size, num_query_tokens, D)
+        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
+
+        # 6. 调用Q-Former的生成方法
+        outputs = self.Qformer.generate(
+            input_ids=input_ids,         # 初始文本token [BOS]
+            query_embeds=query_tokens,  # 可学习query tokens
+            max_length=max_length,       # 最大生成长度
+            min_length=min_length,       # 最小生成长度
+            num_beams=num_beams,        # beam数量
+            do_sample=use_nucleus_sampling, # 是否采样
+            top_p=top_p,                 # 核采样参数
+            eos_token_id=self.tokenizer.sep_token_id,  # 结束符
+            pad_token_id=self.tokenizer.pad_token_id,   # 填充符
+            **model_kwargs              # 图像特征和掩码
+        )
+
+        # 7. 解码生成的token id为文本
+        captions = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        return captions
+```
 
