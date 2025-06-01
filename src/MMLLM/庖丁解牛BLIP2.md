@@ -142,11 +142,11 @@ class Blip2Qformer(Blip2Base):
 
 #### 1、Image-Text Contrastive Learning (ITC Loss, CLIP-like)
 
-> 目的: Image representation 与 Text representation，以最大化互信息
+> - 目的: Image representation 与 Text representation，以最大化互信息
 >
-> 自注意力掩码策略: Uni-modal Self-attention Mask（单模态自注意力）
+> - 自注意力掩码策略: Uni-modal Self-attention Mask（单模态自注意力）
 >
-> Queries 和 Text 仅能和自己的 tokens 做 attention（Query和Query、Text和Text）
+> - Queries 和 Text 仅能和自己的 tokens 做 attention（Query和Query、Text和Text）
 >
 > ![Uni-modal Self-attention Mask](庖丁解牛BLIP2/4.png)
 
@@ -195,17 +195,145 @@ image_feats 中每个 image_feat 与 text_feat 计算一个 similarity score ，
 ```
 #### 2、Image-Text Matching (ITM Loss，二分类task)
 
-> 目的：通过学习image-text pair是否match，以细粒度对齐 Image representation 与 Text representation
+> - 目的：通过学习image-text pair是否match，以细粒度对齐 Image representation 与 Text representation
 >
-> 自注意力掩码策略: Bi-directional Self-attention Mask（双向自注意力）
+> - 自注意力掩码策略: Bi-directional Self-attention Mask（双向自注意力）
 >
-> Queries 和Text都能和所有的tokens 做attention
+> - Queries 和Text都能和所有的tokens 做attention
+> 
 > ![Bi-directional Self-attention Mask](庖丁解牛BLIP2/7.png)
 
 
 每个output query embedding送到二分类器中，得到一个logit；所有logits的平均作为最终的matching score:
 
 ![matching score](庖丁解牛BLIP2/8.png)
+
+```python
+  ###============== Image-text Matching ===================###
+        text_input_ids_world = text_tokens.input_ids
+        text_attention_mask_world = text_tokens.attention_mask
+        image_embeds_world = image_embeds
+
+        with torch.no_grad():
+            # bs (batch size) ， diag_indices = [0,1,2,...,bs-1]
+            diag_indices = torch.arange(bs, device=sim_t2i.device)
+            # 把相似度矩阵对角线元素置为负无穷大，以避免模型将匹配图文对挑选为负样本
+            # (0,0) , (1,1) ... (bs-1,bs-1) 位置处设置为 -10000
+            sim_t2i[diag_indices, diag_indices] = -10000
+            sim_i2t[diag_indices, diag_indices] = -10000
+           
+            weights_t2i = F.softmax(sim_t2i, dim=1)
+            weights_i2t = F.softmax(sim_i2t, dim=1)
+
+        # 为每个文本选择一个负样本图像
+        image_embeds_neg = []
+        for b in range(bs):
+            neg_idx = torch.multinomial(weights_t2i[b], 1).item()
+            image_embeds_neg.append(image_embeds_world[neg_idx])
+        image_embeds_neg = torch.stack(image_embeds_neg, dim=0)
+
+        # 为每个图像选择一个负样本文本
+        text_ids_neg = []
+        text_atts_neg = []
+        for b in range(bs):
+            neg_idx = torch.multinomial(weights_i2t[b], 1).item()
+            text_ids_neg.append(text_input_ids_world[neg_idx])
+            text_atts_neg.append(text_attention_mask_world[neg_idx])
+        text_ids_neg = torch.stack(text_ids_neg, dim=0)
+        text_atts_neg = torch.stack(text_atts_neg, dim=0)
+
+        # 构建输入文本列表: [正样本batch，负样本batch1，负样本batch2] ，维度为 (3*bs,seq_len)
+        text_ids_all = torch.cat(
+            [text_tokens.input_ids, text_tokens.input_ids, text_ids_neg], dim=0
+        )
+        text_atts_all = torch.cat(
+            [text_tokens.attention_mask, text_tokens.attention_mask, text_atts_neg],
+            dim=0,
+        )
+        
+        # 构建query tokens列表: [正样本batch，负样本batch1，负样本batch2] ，维度为 (3*bs,seq_len,hidden_size)
+        query_tokens_itm = self.query_tokens.expand(text_ids_all.shape[0], -1, -1)
+        query_atts_itm = torch.ones(query_tokens_itm.size()[:-1], dtype=torch.long).to(
+            image.device
+        )
+        # 构建query和text的padding mask ，维度为 (3*bs,seq_len)
+        attention_mask_all = torch.cat([query_atts_itm, text_atts_all], dim=1)
+        
+         # 构建输入图像列表: [正样本batch，负样本batch1，负样本batch2] ，维度为 (3*bs,seq_len,hidden_size)       
+        image_embeds_all = torch.cat(
+            [image_embeds, image_embeds_neg, image_embeds], dim=0
+        )
+        image_atts_all = torch.ones(image_embeds_all.size()[:-1], dtype=torch.long).to(
+            image.device
+        )
+        
+        # 1. 将输入文本转换为嵌入列表后和query tokens 在seq_len维度上拼接起来，维度为 (3*bs,text_seq_len + query_tokens_seq_len,hidden_size)
+        # 2. 将文本和query tokens拼接得到的结果和图像嵌入进行cross attention计算，编码后得到输出的结果
+        output_itm = self.Qformer.bert(
+            text_ids_all,
+            query_embeds=query_tokens_itm,
+            attention_mask=attention_mask_all,
+            encoder_hidden_states=image_embeds_all,
+            encoder_attention_mask=image_atts_all,
+            return_dict=True,
+        )
+
+        # 取  (3*bs,text_seq_len + query_tokens_seq_len,hidden_size) 中 query tokens部分的结果，维度为 (3*bs,query_tokens_seq_len,hidden_size) 
+        vl_embeddings = output_itm.last_hidden_state[:, : query_tokens_itm.size(1), :]
+        # 把query tokens部分的每个位置都映射到2维匹配空间，维度为 (3*bs,query_tokens_seq_len,2)
+        vl_output = self.itm_head(vl_embeddings)
+        # 取每个位置的平均作为最终的匹配得分，维度为 (3*bs,2)
+        logits = vl_output.mean(dim=1)
+
+        # 构建匹配标签: [正样本batch=1，负样本batch1=0，负样本batch2=0] ，维度为 (3*bs)  
+        itm_labels = torch.cat(
+            [torch.ones(bs, dtype=torch.long), torch.zeros(2 * bs, dtype=torch.long)],
+            dim=0,
+        ).to(image.device)
+        # 计算交叉熵损失
+        loss_itm = F.cross_entropy(logits, itm_labels)
+```
+当文本和query tokens同时输入BertModel时，BertEmbeddings会将text embeddings和query tokens的embeddings在seq_len维度上拼接起来。
+
+```python
+class BertEmbeddings(nn.Module):
+    ...
+    def forward(
+        self,
+        input_ids=None,
+        position_ids=None,
+        query_embeds=None,
+        past_key_values_length=0,
+    ):
+        # 计算序列长度
+        if input_ids is not None:
+            seq_length = input_ids.size()[1]
+        else:
+            seq_length = 0
+
+        # 如果未提供位置id，则自动生成
+        if position_ids is None:
+            position_ids = self.position_ids[
+                :, past_key_values_length : seq_length + past_key_values_length
+            ].clone()
+
+        # 词嵌入与位置嵌入相加，若有query_embeds则拼接
+        if input_ids is not None:
+            embeddings = self.word_embeddings(input_ids)
+            if self.position_embedding_type == "absolute":
+                position_embeddings = self.position_embeddings(position_ids)
+                embeddings = embeddings + position_embeddings
+
+            if query_embeds is not None:
+                embeddings = torch.cat((query_embeds, embeddings), dim=1)
+        else:
+            embeddings = query_embeds
+
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.dropout(embeddings)
+        return embeddings
+```
+
 
 
 BertLayer 核心代码实现如下:
