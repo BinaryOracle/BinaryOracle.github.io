@@ -675,5 +675,60 @@ Stage 2 是为了把 Q-Former 和冻结参数的 LLM 连接起来，以利用 LL
 
 3. 后将投影后的 $Z$ 添加到 input text embeddings前面，Queries 的输出蕴含了视觉信息，送入LLM时，充当了soft visual prompts 。
 
-4. 由于 Q-Former 已经过预训练以提取语言信息视觉表示，因此它有效地充当信息瓶颈，将最有用的信息提供给 LLM，同时删除不相关的视觉信息。这减少了LLM学习视觉语言对齐的负担，从而缓解了灾难性的遗忘问题。
+> 由于 Q-Former 已经过预训练以提取语言信息视觉表示，因此它有效地充当信息瓶颈，将最有用的信息提供给 LLM，同时删除不相关的视觉信息。这减少了LLM学习视觉语言对齐的负担，从而缓解了灾难性的遗忘问题。
+
+	
+Blip2Qformer 的generate方法负责完成图像描述生成（图文到文本）:
+
+```python
+class Blip2Qformer(Blip2Base):
+    ...
+    def generate(
+        self,
+        samples,
+        use_nucleus_sampling=False,
+        num_beams=3,
+        max_length=30,
+        min_length=10,
+        top_p=0.9,
+        repetition_penalty=1.0,
+    ):
+        image = samples["image"]
+        image_embeds = self.ln_vision(self.visual_encoder(image))
+
+        if not use_nucleus_sampling:
+            image_embeds = image_embeds.repeat_interleave(num_beams, dim=0)
+        else:
+            num_beams = 1
+        image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(
+            image.device
+        )
+
+        model_kwargs = {
+            "encoder_hidden_states": image_embeds,
+            "encoder_attention_mask": image_atts,
+        }
+
+        input_ids = (
+            torch.LongTensor(image.size(0), 1)
+            .fill_(self.tokenizer.bos_token_id)
+            .to(image.device)
+        )
+        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
+
+        outputs = self.Qformer.generate(
+            input_ids=input_ids,
+            query_embeds=query_tokens,
+            max_length=max_length,
+            min_length=min_length,
+            num_beams=num_beams,
+            do_sample=use_nucleus_sampling,
+            top_p=top_p,
+            eos_token_id=self.tokenizer.sep_token_id,
+            pad_token_id=self.tokenizer.pad_token_id,
+            **model_kwargs
+        )
+        captions = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        return captions
+```
 
