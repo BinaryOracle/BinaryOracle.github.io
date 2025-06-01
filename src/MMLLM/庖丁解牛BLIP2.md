@@ -4,7 +4,7 @@ category:
   - MMLLM
 tag:
   - 多模态
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-05-25
 cover: assets/cover/BLIP2.png
