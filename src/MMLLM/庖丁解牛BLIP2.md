@@ -350,224 +350,25 @@ class BertEmbeddings(nn.Module):
 > ![Multimodal Causal Self-attention Mask](庖丁解牛BLIP2/10.png)
 
 
-
-
-
-
-BertLayer 核心代码实现如下:
-
 ```python
-class BertLayer(nn.Module):
-    def __init__(self, config, layer_num):
-        super().__init__()
-        ...
-        self.attention = BertAttention(config)
-        # 每个几层,添加一个cross attention
-        if (
-            self.config.add_cross_attention
-            and layer_num % self.config.cross_attention_freq == 0
-        ):
-            self.crossattention = BertAttention(
-                config, is_cross_attention=self.config.add_cross_attention
-            )
-            self.has_cross_attention = True
-        else:
-            self.has_cross_attention = False
-        self.intermediate = BertIntermediate(config)
-        self.output = BertOutput(config)
-
-        self.intermediate_query = BertIntermediate(config)
-        self.output_query = BertOutput(config)
-
-    def forward(
-        self,
-        hidden_states, # query tokens
-        attention_mask=None, # query token padding mask
-        head_mask=None,
-        encoder_hidden_states=None, # image tokens
-        encoder_attention_mask=None, # image padding mask
-        past_key_value=None,
-        output_attentions=False,
-        query_length=0,
-    ):
-        # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
-        self_attn_past_key_value = (
-            past_key_value[:2] if past_key_value is not None else None
-        )
-        # 如果
-        self_attention_outputs = self.attention(
-            hidden_states,
-            attention_mask,
-            head_mask,
-            output_attentions=output_attentions,
-            past_key_value=self_attn_past_key_value,
-        )
-        attention_output = self_attention_outputs[0]
-        outputs = self_attention_outputs[1:-1]
-
-        present_key_value = self_attention_outputs[-1]
-
-        if query_length > 0: # query tokens nums = 32
-            query_attention_output = attention_output[:, :query_length, :]
-            # query tokens 经过 attention 后得到  context states
-            if self.has_cross_attention:
-                # q (context states) , k 和 v 来自 images encoder
-                # q(b,32,h) * k(b,seq_len,h).t = (b,32,seq_len)
-                # score(b,32,seq_len) * v(b,seq_len,h) = (b,32,h)
-                cross_attention_outputs = self.crossattention(
-                    query_attention_output,
-                    attention_mask,
-                    head_mask,
-                    encoder_hidden_states,
-                    encoder_attention_mask,
-                    output_attentions=output_attentions,
-                )
-                query_attention_output = cross_attention_outputs[0]
-                outputs = (
-                    outputs + cross_attention_outputs[1:-1]
-                )  # add cross attentions if we output attention weights
-            #  分块并行处理
-            layer_output = apply_chunking_to_forward(
-                self.feed_forward_chunk_query,
-                self.chunk_size_feed_forward,
-                self.seq_len_dim,
-                query_attention_output,
-            )
-            if attention_output.shape[1] > query_length:
-                layer_output_text = apply_chunking_to_forward(
-                    self.feed_forward_chunk,
-                    self.chunk_size_feed_forward,
-                    self.seq_len_dim,
-                    attention_output[:, query_length:, :],
-                )
-                layer_output = torch.cat([layer_output, layer_output_text], dim=1)
-        else:
-            layer_output = apply_chunking_to_forward(
-                self.feed_forward_chunk,
-                self.chunk_size_feed_forward,
-                self.seq_len_dim,
-                attention_output,
-            )
-        outputs = (layer_output,) + outputs
-
-        outputs = outputs + (present_key_value,)
-
-        return outputs
-
-    def feed_forward_chunk(self, attention_output):
-        intermediate_output = self.intermediate(attention_output)
-        layer_output = self.output(intermediate_output, attention_output)
-        return layer_output
-
-    def feed_forward_chunk_query(self, attention_output):
-        intermediate_output = self.intermediate_query(attention_output)
-        layer_output = self.output_query(intermediate_output, attention_output)
-        return layer_output
-```
-
-```python
-class BertAttention(nn.Module):
-    def __init__(self, config, is_cross_attention=False):
-        super().__init__()
-        self.self = BertSelfAttention(config, is_cross_attention)
-        self.output = BertSelfOutput(config)
-
-    def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-        head_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        past_key_value=None,
-        output_attentions=False,
-    ):
-        self_outputs = self.self(
-            hidden_states,
-            attention_mask,
-            head_mask,
-            encoder_hidden_states,
-            encoder_attention_mask,
-            past_key_value,
-            output_attentions,
-        ) #  (context_layer, attention_probs)
-        attention_output = self.output(self_outputs[0], hidden_states)
-
-        outputs = (attention_output,) + self_outputs[
-            1:
-        ]  # add attentions if we output them
-        return outputs
-```
-
-```python
-class BertSelfAttention(nn.Module):
-    ...
-    def transpose_for_scores(self, x):
-        # 调整张量形状以便多头注意力计算
-        new_x_shape = x.size()[:-1] + (
-            self.num_attention_heads,
-            self.attention_head_size,
-        )
-        x = x.view(*new_x_shape)
-        return x.permute(0, 2, 1, 3)
-
-    def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-        head_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        past_key_value=None,
-        output_attentions=False,
-    ):
-
-        # 判断是否为交叉注意力
-        is_cross_attention = encoder_hidden_states is not None
-
-        if is_cross_attention: # key and value come from image
-            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
-            value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
-            attention_mask = encoder_attention_mask
-        elif past_key_value is not None:
-            key_layer = self.transpose_for_scores(self.key(hidden_states))
-            value_layer = self.transpose_for_scores(self.value(hidden_states))
-            key_layer = torch.cat([past_key_value[0], key_layer], dim=2)
-            value_layer = torch.cat([past_key_value[1], value_layer], dim=2)
-        else:
-            key_layer = self.transpose_for_scores(self.key(hidden_states))
-            value_layer = self.transpose_for_scores(self.value(hidden_states))
-
-        mixed_query_layer = self.query(hidden_states)
-
-        query_layer = self.transpose_for_scores(mixed_query_layer)
-
-        past_key_value = (key_layer, value_layer)
-
-        # 计算注意力分数
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-        if attention_mask is not None:
-            # 应用注意力掩码
-            attention_scores = attention_scores + attention_mask
-
-        # softmax归一化得到注意力概率
-        attention_probs = nn.Softmax(dim=-1)(attention_scores)
-
-        # dropout防止过拟合
-        attention_probs_dropped = self.dropout(attention_probs)
-
-        # 计算上下文表示
-        context_layer = torch.matmul(attention_probs_dropped, value_layer)
-
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = context_layer.view(*new_context_layer_shape)
-
-        outputs = (
-            (context_layer, attention_probs) if output_attentions else (context_layer,)
+        ##================= Image Captioning ========================##
+        decoder_input_ids = text_tokens.input_ids.clone()
+        decoder_input_ids[:, 0] = self.tokenizer.bos_token_id
+        labels = decoder_input_ids.masked_fill(
+            decoder_input_ids == self.tokenizer.pad_token_id, -100
         )
 
-        outputs = outputs + (past_key_value,)
-        return outputs
+        query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(
+            image.device
+        )
+        attention_mask = torch.cat([query_atts, text_tokens.attention_mask], dim=1)
+        lm_output = self.Qformer(
+            decoder_input_ids,
+            attention_mask=attention_mask,
+            past_key_values=query_output.past_key_values,
+            return_dict=True,
+            labels=labels,
+        )
+
+        loss_lm = lm_output.loss
 ```
