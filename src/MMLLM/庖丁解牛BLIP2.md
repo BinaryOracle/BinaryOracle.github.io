@@ -552,11 +552,14 @@ class BertEncoder(nn.Module):
         ...
         ##================= Image Captioning ========================##
         decoder_input_ids = text_tokens.input_ids.clone()
+        # 将第一个 token 替换为 BOS（Begin Of Sentence）标记，表示“开始生成句子”
         decoder_input_ids[:, 0] = self.tokenizer.bos_token_id
+        # 将 padding token 替换为 -100，这是 CrossEntropyLoss 默认忽略的标签值
         labels = decoder_input_ids.masked_fill(
             decoder_input_ids == self.tokenizer.pad_token_id, -100
         )
-
+        
+          
         query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(
             image.device
         )
