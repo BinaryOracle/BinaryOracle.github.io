@@ -613,6 +613,7 @@ class BertLMHeadModel(BertPreTrainedModel):
         reduction="mean",
     ):
         ...
+        # 调用 BertModel 进行文本编码 (结合缓存的attention key&value)
         outputs = self.bert(
             input_ids,
             attention_mask=attention_mask,
