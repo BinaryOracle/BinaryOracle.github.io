@@ -293,6 +293,48 @@ image_feats 中每个 image_feat 与 text_feat 计算一个 similarity score ，
         # 计算交叉熵损失
         loss_itm = F.cross_entropy(logits, itm_labels)
 ```
+当文本和query tokens同时输入BertModel时，BertEmbeddings会将text embeddings和query tokens的embeddings在seq_len维度上拼接起来。
+
+```python
+class BertEmbeddings(nn.Module):
+    ...
+    def forward(
+        self,
+        input_ids=None,
+        position_ids=None,
+        query_embeds=None,
+        past_key_values_length=0,
+    ):
+        # 计算序列长度
+        if input_ids is not None:
+            seq_length = input_ids.size()[1]
+        else:
+            seq_length = 0
+
+        # 如果未提供位置id，则自动生成
+        if position_ids is None:
+            position_ids = self.position_ids[
+                :, past_key_values_length : seq_length + past_key_values_length
+            ].clone()
+
+        # 词嵌入与位置嵌入相加，若有query_embeds则拼接
+        if input_ids is not None:
+            embeddings = self.word_embeddings(input_ids)
+            if self.position_embedding_type == "absolute":
+                position_embeddings = self.position_embeddings(position_ids)
+                embeddings = embeddings + position_embeddings
+
+            if query_embeds is not None:
+                embeddings = torch.cat((query_embeds, embeddings), dim=1)
+        else:
+            embeddings = query_embeds
+
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.dropout(embeddings)
+        return embeddings
+```
+
+
 
 BertLayer 核心代码实现如下:
 
