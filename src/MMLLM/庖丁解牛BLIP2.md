@@ -333,6 +333,9 @@ class BertEmbeddings(nn.Module):
         embeddings = self.dropout(embeddings)
         return embeddings
 ```
+下图展示了 Image-Text Matching 的完整计算流程，关于BertModel的代码解析部分，将会在下文进行详细讲解:
+
+![庖丁解牛BLIP2](庖丁解牛BLIP2/9.png)
 
 
 
