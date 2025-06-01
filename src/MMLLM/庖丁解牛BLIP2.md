@@ -659,3 +659,21 @@ class BertLMHeadModel(BertPreTrainedModel):
             cross_attentions=outputs.cross_attentions,
         )
 ```
+> BertModel 的 forward 方法中，当is_decoder=True时，会在get_extended_attention_mask方法中，构建一个下三角矩阵作为因果掩码矩阵。
+
+### Stage 2: Generative Learning（生成学习）
+
+Stage 2 是为了把 Q-Former 和冻结参数的 LLM 连接起来，以利用 LLM 的文本生成能力。
+
+支持两种LLM（decoder only、encoder-decoder based）:
+
+![Generative Learning](庖丁解牛BLIP2/11.png)
+
+1. 首先输入图片，直接输入冻结参数的 Image Encoder，得到图像的表征。
+
+2. 然后图像的表征和 Queries 一起送入 Q-Former，得到 Queries 的输出 $Z$ ，使用全连接 (FC) 层将 $Z$ 线性投影到与 LLM 的text embedding相同维度。
+
+3. 后将投影后的 $Z$ 添加到 input text embeddings前面，Queries 的输出蕴含了视觉信息，送入LLM时，充当了soft visual prompts 。
+
+4. 由于 Q-Former 已经过预训练以提取语言信息视觉表示，因此它有效地充当信息瓶颈，将最有用的信息提供给 LLM，同时删除不相关的视觉信息。这减少了LLM学习视觉语言对齐的负担，从而缓解了灾难性的遗忘问题。
+
