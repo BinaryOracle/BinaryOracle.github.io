@@ -349,26 +349,306 @@ class BertEmbeddings(nn.Module):
 > 
 > ![Multimodal Causal Self-attention Mask](庖丁解牛BLIP2/10.png)
 
+**视觉编码阶段**:
+
+图像通过视觉编码器（如 ViT）编码为图像特征 image_embeds。Query tokens 通过 cross-attention 吸收图像特征，再通过 self-attention 生成压缩的视觉表示。缓存 query tokens 的 self-attention 的 past_key_values（而非 cross-attention 的 key/value）。
+
+QFormer 会使用 past_key_values 缓存和复用 EncoderLayer 中 self-attention 的 key/value :
+
+1. BertSelfAttention: 自注意力和交叉注意力流程统一化，每次计算后返回本次可能需要缓存的key & value
 
 ```python
-        ##================= Image Captioning ========================##
-        decoder_input_ids = text_tokens.input_ids.clone()
-        decoder_input_ids[:, 0] = self.tokenizer.bos_token_id
-        labels = decoder_input_ids.masked_fill(
-            decoder_input_ids == self.tokenizer.pad_token_id, -100
-        )
+class BertSelfAttention(nn.Module):
+    ...
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        head_mask=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        past_key_value=None,
+        output_attentions=False,
+    ):
 
-        query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(
-            image.device
+        # 判断是否为交叉注意力
+        is_cross_attention = encoder_hidden_states is not None
+
+        # 交叉注意力则key和value都来自图像,key来自query tokens
+        if is_cross_attention:
+            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
+            value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
+            attention_mask = encoder_attention_mask
+        # 如果有缓存的key,value传入, 此时先用text embedding计算出key和value
+        # 再和缓存的key,value在seq_len的维度拼接起来        
+        elif past_key_value is not None:
+            key_layer = self.transpose_for_scores(self.key(hidden_states))
+            value_layer = self.transpose_for_scores(self.value(hidden_states))
+            key_layer = torch.cat([past_key_value[0], key_layer], dim=2) # (Batch,Heads,Seq_len,Hidden_size)
+            value_layer = torch.cat([past_key_value[1], value_layer], dim=2)
+        else:
+        # 自注意力    
+            key_layer = self.transpose_for_scores(self.key(hidden_states))
+            value_layer = self.transpose_for_scores(self.value(hidden_states))
+        
+        # 交叉注意力: 传入图像，则q来自query tokens
+        # 自注意力: q来自query tokens 或者 text embedding
+        mixed_query_layer = self.query(hidden_states)
+           
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+        
+        # * 缓存key和value
+        past_key_value = (key_layer, value_layer)
+
+        # 计算注意力分数
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        if attention_mask is not None:
+            # 应用注意力掩码
+            attention_scores = attention_scores + attention_mask
+
+        # softmax归一化得到注意力概率
+        attention_probs = nn.Softmax(dim=-1)(attention_scores)
+
+        if is_cross_attention and self.save_attention:
+            self.save_attention_map(attention_probs)
+            attention_probs.register_hook(self.save_attn_gradients)
+
+        # dropout防止过拟合
+        attention_probs_dropped = self.dropout(attention_probs)
+
+        # 计算上下文表示
+        context_layer = torch.matmul(attention_probs_dropped, value_layer)
+
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+
+        outputs = (
+            (context_layer, attention_probs) if output_attentions else (context_layer,)
         )
-        attention_mask = torch.cat([query_atts, text_tokens.attention_mask], dim=1)
-        lm_output = self.Qformer(
-            decoder_input_ids,
-            attention_mask=attention_mask,
-            past_key_values=query_output.past_key_values,
+        
+        # outputs 列表最后一个记录了缓存的key和value 
+        outputs = outputs + (past_key_value,)
+        return outputs
+```
+
+2.  BertLayer: 负责组织自注意力和交叉注意力的运算流程
+
+```python
+class BertLayer(nn.Module):
+    ...
+    def forward(
+        self,
+        hidden_states, # query tokens
+        attention_mask=None, # query token padding mask
+        head_mask=None,
+        encoder_hidden_states=None, # image tokens
+        encoder_attention_mask=None, # image padding mask
+        past_key_value=None,
+        output_attentions=False,
+        query_length=0,
+    ):
+        self_attn_past_key_value = (
+            past_key_value[:2] if past_key_value is not None else None
+        )
+        # 自注意力运算
+        self_attention_outputs = self.attention(
+            hidden_states,
+            attention_mask,
+            head_mask,
+            output_attentions=output_attentions,
+            past_key_value=self_attn_past_key_value, # 缓存的key和value
+        )
+        attention_output = self_attention_outputs[0]
+        outputs = self_attention_outputs[1:-1]
+
+        present_key_value = self_attention_outputs[-1]
+
+        # 交叉注意力运算 
+        if query_length > 0:
+            query_attention_output = attention_output[:, :query_length, :]
+            if self.has_cross_attention:
+                cross_attention_outputs = self.crossattention(
+                    query_attention_output,
+                    attention_mask,
+                    head_mask,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
+                    output_attentions=output_attentions,
+                )
+                query_attention_output = cross_attention_outputs[0]
+                outputs = (
+                    outputs + cross_attention_outputs[1:-1]
+                ) 
+        ...        
+        outputs = (layer_output,) + outputs
+        outputs = outputs + (present_key_value,) # outputs 列表最后一个记录了缓存的key和value 
+        return outputs
+```
+
+3.  BertEncoder:  负责组织多个 BertLayer 叠加的运算流程
+
+```python
+class BertEncoder(nn.Module):
+    ...
+    def forward(
+        self,
+        hidden_states, # query tokens
+        attention_mask=None, # query tokens padding mask
+        head_mask=None,
+        encoder_hidden_states=None, # images
+        encoder_attention_mask=None, # images padding mask
+        past_key_values=None,
+        use_cache=None,
+        output_attentions=False,
+        output_hidden_states=False,
+        return_dict=True,
+        query_length=0,
+    ):
+        ...
+        for i in range(self.config.num_hidden_layers):
+            layer_module = self.layer[i]
+            ...
+            # 如果有缓存，则计算当前层BertLayer时，会从缓存中取出对应层先前缓存的key&value
+            past_key_value = past_key_values[i] if past_key_values is not None else None
+            layer_outputs = layer_module(
+                    hidden_states,
+                    attention_mask,
+                    layer_head_mask,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
+                    past_key_value,
+                    output_attentions,
+                    query_length,
+            )
+
+            hidden_states = layer_outputs[0]
+            # 每一层BertLayer产生的key&value都会进行缓存
+            if use_cache:
+                next_decoder_cache += (layer_outputs[-1],)
+        ...       
+        return BaseModelOutputWithPastAndCrossAttentions(
+            last_hidden_state=hidden_states,
+            past_key_values=next_decoder_cache,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+            cross_attentions=all_cross_attentions,
+        )
+```
+
+4.  Image-Grounded Text Generation 学习目标
+
+```python
+        ...
+        query_output = self.Qformer.bert(
+            query_embeds=query_tokens,
+            encoder_hidden_states=image_embeds,
+            encoder_attention_mask=image_atts,
+            use_cache=True, # 缓存key&value
             return_dict=True,
-            labels=labels,
+        )
+        ...
+       ##================= Image Captioning ========================##
+       # 这一部分的目标是：根据图像特征，使用 Q-Former 解码器生成文本描述（caption）
+
+       # Step 1: 准备 decoder 的输入 token IDs
+       decoder_input_ids = text_tokens.input_ids.clone()
+       # 将第一个 token 替换为 BOS（Begin Of Sentence）标记，表示“开始生成句子”
+       decoder_input_ids[:, 0] = self.tokenizer.bos_token_id
+
+       # Step 2: 构造训练目标 labels
+       # 将 padding token 替换为 -100，这是 CrossEntropyLoss 默认忽略的标签值
+       labels = decoder_input_ids.masked_fill(
+          decoder_input_ids == self.tokenizer.pad_token_id, -100
+       )
+
+       # Step 3: 构建 attention_mask（包含 query tokens 和 文本 token 的 mask）
+       # query_atts 是 query tokens 的 attention mask，全为 1（因为都是有效 token）
+       query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(image.device)
+       # 将 query token 的 mask 和文本 token 的 mask 拼接在一起
+       attention_mask = torch.cat([query_atts, text_tokens.attention_mask], dim=1)
+
+       # Step 4: 调用 Q-Former 解码器进行文本生成
+       lm_output = self.Qformer(
+              decoder_input_ids,                  # 输入 token ID 序列（如 [BOS], dog, is...）
+              attention_mask=attention_mask,      # 指明哪些位置是有效的（非 padding）
+              past_key_values=query_output.past_key_values,  # 编码器输出的 key/value，包含图像信息
+              return_dict=True,                   # 返回字典格式结果
+              labels=labels,                      # 训练目标，用于计算 loss
+       )
+
+       # Step 5: 提取语言模型损失
+       loss_lm = lm_output.loss  # 使用交叉熵损失衡量生成与真实之间的差异
+```
+5. BertLMHeadModel: 自回归语言建模任务（如文本生成）
+
+```python
+class BertLMHeadModel(BertPreTrainedModel):
+    ...
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        position_ids=None,
+        head_mask=None,
+        query_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        labels=None,
+        past_key_values=None,
+        use_cache=True,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        return_logits=False,
+        is_decoder=True,
+        reduction="mean",
+    ):
+        ...
+        outputs = self.bert(
+            input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            query_embeds=query_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            is_decoder=is_decoder,
         )
 
-        loss_lm = lm_output.loss
+        sequence_output = outputs[0]
+        ...
+        # self.cls 是一个分类头（BertOnlyMLMHead），它将每个 token 的向量映射到词汇表空间（logits）
+        prediction_scores = self.cls(sequence_output)
+        ...  
+        lm_loss = None
+        if labels is not None:
+            # 因为我们要预测下一个 token，所以把 logits 和 labels 错位对齐：
+            # shifted_prediction_scores: 所有 token 的预测（除了最后一个）
+            shifted_prediction_scores = prediction_scores[:, :-1, :].contiguous()
+            # labels: 所有 token 的真实值（从第二个开始）
+            labels = labels[:, 1:].contiguous()
+            loss_fct = CrossEntropyLoss(reduction=reduction, label_smoothing=0.1)
+            lm_loss = loss_fct(
+                shifted_prediction_scores.view(-1, self.config.vocab_size),
+                labels.view(-1),
+            )
+            if reduction == "none":
+                lm_loss = lm_loss.view(prediction_scores.size(0), -1).sum(1)
+        ...        
+        return CausalLMOutputWithCrossAttentions(
+            loss=lm_loss,
+            logits=prediction_scores,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            cross_attentions=outputs.cross_attentions,
+        )
 ```
