@@ -550,27 +550,105 @@ class BertEncoder(nn.Module):
             return_dict=True,
         )
         ...
-        ##================= Image Captioning ========================##
-        decoder_input_ids = text_tokens.input_ids.clone()
-        # 将第一个 token 替换为 BOS（Begin Of Sentence）标记，表示“开始生成句子”
-        decoder_input_ids[:, 0] = self.tokenizer.bos_token_id
-        # 将 padding token 替换为 -100，这是 CrossEntropyLoss 默认忽略的标签值
-        labels = decoder_input_ids.masked_fill(
-            decoder_input_ids == self.tokenizer.pad_token_id, -100
-        )
-        
-          
-        query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(
-            image.device
-        )
-        attention_mask = torch.cat([query_atts, text_tokens.attention_mask], dim=1)
-        lm_output = self.Qformer(
-            decoder_input_ids,
+       ##================= Image Captioning ========================##
+       # 这一部分的目标是：根据图像特征，使用 Q-Former 解码器生成文本描述（caption）
+
+       # Step 1: 准备 decoder 的输入 token IDs
+       decoder_input_ids = text_tokens.input_ids.clone()
+       # 将第一个 token 替换为 BOS（Begin Of Sentence）标记，表示“开始生成句子”
+       decoder_input_ids[:, 0] = self.tokenizer.bos_token_id
+
+       # Step 2: 构造训练目标 labels
+       # 将 padding token 替换为 -100，这是 CrossEntropyLoss 默认忽略的标签值
+       labels = decoder_input_ids.masked_fill(
+          decoder_input_ids == self.tokenizer.pad_token_id, -100
+       )
+
+       # Step 3: 构建 attention_mask（包含 query tokens 和 文本 token 的 mask）
+       # query_atts 是 query tokens 的 attention mask，全为 1（因为都是有效 token）
+       query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(image.device)
+       # 将 query token 的 mask 和文本 token 的 mask 拼接在一起
+       attention_mask = torch.cat([query_atts, text_tokens.attention_mask], dim=1)
+
+       # Step 4: 调用 Q-Former 解码器进行文本生成
+       lm_output = self.Qformer(
+              decoder_input_ids,                  # 输入 token ID 序列（如 [BOS], dog, is...）
+              attention_mask=attention_mask,      # 指明哪些位置是有效的（非 padding）
+              past_key_values=query_output.past_key_values,  # 编码器输出的 key/value，包含图像信息
+              return_dict=True,                   # 返回字典格式结果
+              labels=labels,                      # 训练目标，用于计算 loss
+       )
+
+       # Step 5: 提取语言模型损失
+       loss_lm = lm_output.loss  # 使用交叉熵损失衡量生成与真实之间的差异
+```
+5. BertLMHeadModel: 自回归语言建模任务（如文本生成）
+
+```python
+class BertLMHeadModel(BertPreTrainedModel):
+    ...
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        position_ids=None,
+        head_mask=None,
+        query_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        labels=None,
+        past_key_values=None,
+        use_cache=True,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        return_logits=False,
+        is_decoder=True,
+        reduction="mean",
+    ):
+        ...
+        outputs = self.bert(
+            input_ids,
             attention_mask=attention_mask,
-            past_key_values=query_output.past_key_values, # 传入缓存的每一层key&value
-            return_dict=True,
-            labels=labels,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            query_embeds=query_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            is_decoder=is_decoder,
         )
 
-        loss_lm = lm_output.loss
+        sequence_output = outputs[0]
+        ...
+        # self.cls 是一个分类头（BertOnlyMLMHead），它将每个 token 的向量映射到词汇表空间（logits）
+        prediction_scores = self.cls(sequence_output)
+        ...  
+        lm_loss = None
+        if labels is not None:
+            # 因为我们要预测下一个 token，所以把 logits 和 labels 错位对齐：
+            # shifted_prediction_scores: 所有 token 的预测（除了最后一个）
+            shifted_prediction_scores = prediction_scores[:, :-1, :].contiguous()
+            # labels: 所有 token 的真实值（从第二个开始）
+            labels = labels[:, 1:].contiguous()
+            loss_fct = CrossEntropyLoss(reduction=reduction, label_smoothing=0.1)
+            lm_loss = loss_fct(
+                shifted_prediction_scores.view(-1, self.config.vocab_size),
+                labels.view(-1),
+            )
+            if reduction == "none":
+                lm_loss = lm_loss.view(prediction_scores.size(0), -1).sum(1)
+        ...        
+        return CausalLMOutputWithCrossAttentions(
+            loss=lm_loss,
+            logits=prediction_scores,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            cross_attentions=outputs.cross_attentions,
+        )
 ```
