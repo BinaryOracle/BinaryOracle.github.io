@@ -142,11 +142,11 @@ class Blip2Qformer(Blip2Base):
 
 #### 1、Image-Text Contrastive Learning (ITC Loss, CLIP-like)
 
-> 目的: Image representation 与 Text representation，以最大化互信息
+> - 目的: Image representation 与 Text representation，以最大化互信息
 >
-> 自注意力掩码策略: Uni-modal Self-attention Mask（单模态自注意力）
+> - 自注意力掩码策略: Uni-modal Self-attention Mask（单模态自注意力）
 >
-> Queries 和 Text 仅能和自己的 tokens 做 attention（Query和Query、Text和Text）
+> - Queries 和 Text 仅能和自己的 tokens 做 attention（Query和Query、Text和Text）
 >
 > ![Uni-modal Self-attention Mask](庖丁解牛BLIP2/4.png)
 
@@ -195,11 +195,12 @@ image_feats 中每个 image_feat 与 text_feat 计算一个 similarity score ，
 ```
 #### 2、Image-Text Matching (ITM Loss，二分类task)
 
-> 目的：通过学习image-text pair是否match，以细粒度对齐 Image representation 与 Text representation
+> - 目的：通过学习image-text pair是否match，以细粒度对齐 Image representation 与 Text representation
 >
-> 自注意力掩码策略: Bi-directional Self-attention Mask（双向自注意力）
+> - 自注意力掩码策略: Bi-directional Self-attention Mask（双向自注意力）
 >
-> Queries 和Text都能和所有的tokens 做attention
+> - Queries 和Text都能和所有的tokens 做attention
+> 
 > ![Bi-directional Self-attention Mask](庖丁解牛BLIP2/7.png)
 
 
@@ -207,6 +208,86 @@ image_feats 中每个 image_feat 与 text_feat 计算一个 similarity score ，
 
 ![matching score](庖丁解牛BLIP2/8.png)
 
+```python
+  ###============== Image-text Matching ===================###
+
+        text_input_ids_world = text_tokens.input_ids
+        text_attention_mask_world = text_tokens.attention_mask
+        image_embeds_world = image_embeds
+
+        with torch.no_grad():
+            if "image_id" in samples.keys():
+                mask = torch.eq(image_ids, image_ids.t())
+                sim_t2i.masked_fill_(mask, -10000)
+                sim_i2t.masked_fill_(mask, -10000)
+            else:
+                # 在单卡中，sim_t2i[b, b] 是自己这一项，屏蔽掉防止作弊
+                diag_indices = torch.arange(bs, device=sim_t2i.device)
+                sim_t2i[diag_indices, diag_indices] = -10000
+                sim_i2t[diag_indices, diag_indices] = -10000
+
+            weights_t2i = F.softmax(sim_t2i, dim=1)
+            weights_i2t = F.softmax(sim_i2t, dim=1)
+
+        # select a negative image for each text
+        image_embeds_neg = []
+        for b in range(bs):
+            neg_idx = torch.multinomial(weights_t2i[b], 1).item()
+            image_embeds_neg.append(image_embeds_world[neg_idx])
+        image_embeds_neg = torch.stack(image_embeds_neg, dim=0)
+
+        # select a negative text for each image
+        text_ids_neg = []
+        text_atts_neg = []
+        for b in range(bs):
+            neg_idx = torch.multinomial(weights_i2t[b], 1).item()
+            text_ids_neg.append(text_input_ids_world[neg_idx])
+            text_atts_neg.append(text_attention_mask_world[neg_idx])
+
+        text_ids_neg = torch.stack(text_ids_neg, dim=0)
+        text_atts_neg = torch.stack(text_atts_neg, dim=0)
+
+        # 构建 ITM 输入：正样本 + 负样本
+        text_ids_all = torch.cat(
+            [text_tokens.input_ids, text_tokens.input_ids, text_ids_neg], dim=0
+        )
+        text_atts_all = torch.cat(
+            [text_tokens.attention_mask, text_tokens.attention_mask, text_atts_neg],
+            dim=0,
+        )
+
+        query_tokens_itm = self.query_tokens.expand(text_ids_all.shape[0], -1, -1)
+        query_atts_itm = torch.ones(query_tokens_itm.size()[:-1], dtype=torch.long).to(
+            image.device
+        )
+        attention_mask_all = torch.cat([query_atts_itm, text_atts_all], dim=1)
+
+        image_embeds_all = torch.cat(
+            [image_embeds, image_embeds_neg, image_embeds], dim=0
+        )
+        image_atts_all = torch.ones(image_embeds_all.size()[:-1], dtype=torch.long).to(
+            image.device
+        )
+
+        output_itm = self.Qformer.bert(
+            text_ids_all,
+            query_embeds=query_tokens_itm,
+            attention_mask=attention_mask_all,
+            encoder_hidden_states=image_embeds_all,
+            encoder_attention_mask=image_atts_all,
+            return_dict=True,
+        )
+
+        vl_embeddings = output_itm.last_hidden_state[:, : query_tokens_itm.size(1), :]
+        vl_output = self.itm_head(vl_embeddings)
+        logits = vl_output.mean(dim=1)
+
+        itm_labels = torch.cat(
+            [torch.ones(bs, dtype=torch.long), torch.zeros(2 * bs, dtype=torch.long)],
+            dim=0,
+        ).to(image.device)
+        loss_itm = F.cross_entropy(logits, itm_labels)
+```
 
 BertLayer 核心代码实现如下:
 
