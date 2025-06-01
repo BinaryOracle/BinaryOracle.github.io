@@ -582,6 +582,12 @@ class BertEncoder(nn.Module):
        # Step 5: 提取语言模型损失
        loss_lm = lm_output.loss  # 使用交叉熵损失衡量生成与真实之间的差异
 ```
+**文本生成阶段:**
+
+将缓存的 past_key_values 作为文本解码器的初始状态。
+
+文本 token 在自回归生成时，通过 self-attention 复用缓存的视觉信息。
+
 5. BertLMHeadModel: 自回归语言建模任务（如文本生成）
 
 ```python
