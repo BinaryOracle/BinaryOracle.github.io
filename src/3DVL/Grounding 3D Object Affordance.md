@@ -5,7 +5,7 @@ category:
 tag:
   - 3D-VL
   - point cloud
-  - 已发布
+  - 编辑中
 footer: 技术共建，知识共享
 date: 2025-05-30
 cover: assets/cover/G3OA.png
