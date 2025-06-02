@@ -31,7 +31,7 @@ author:
 
 ### Fusion 多模态特征融合模块
 
-``python
+```python
 class Fusion(nn.Module):
     def __init__(self, emb_dim = 512, num_heads = 4):
         super().__init__()
