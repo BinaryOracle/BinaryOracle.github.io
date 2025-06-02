@@ -17,6 +17,10 @@ footer: 技术共建，知识共享
 - Javaer 转型 3D - VL 方向研究
 - 现就读于四川大学
 
+有问题需要咨询的小伙伴，可以加微信备注来意:
+
+![](assets/images/wx.png) 
+
 ---
 
 ### ![ =50x50](assets/images/head.png) Elowen 
