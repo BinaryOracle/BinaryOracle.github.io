@@ -436,7 +436,52 @@ class Cross_Attention(nn.Module):
 
         return I_1, I_2
 ```
+### Step 10: 使用分割头预测最终的 3D 可操作性热图
 
+```python
+class Head(nn.Module):
+    def __init__(self, additional_channel, emb_dim, N_p, N_raw):
+        super().__init__()
+        
+        self.emb_dim = emb_dim
+        self.N_p = N_p
+        self.N_raw = N_raw
+        #upsample
+        self.fp3 = PointNetFeaturePropagation(in_channel=512+self.emb_dim, mlp=[768, 512])  
+        self.fp2 = PointNetFeaturePropagation(in_channel=832, mlp=[768, 512]) 
+        self.fp1 = PointNetFeaturePropagation(in_channel=518+additional_channel, mlp=[512, 512]) 
+        self.pool = nn.AdaptiveAvgPool1d(1)
+
+        self.out_head = nn.Sequential(
+            nn.Linear(self.emb_dim, self.emb_dim // 8),
+            nn.BatchNorm1d(self.N_raw),
+            nn.ReLU(),
+            nn.Linear(self.emb_dim // 8, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, multi_feature, affordance_feature, encoder_p):
+        '''
+        multi_feature ---> [B, N_p + N_i, C]
+        affordance_feature ---> [B, N_p + N_i, C]
+        encoder_p ---> [Hierarchy feature]
+        '''
+        B,N,C = multi_feature.size()
+        p_0, p_1, p_2, p_3 = encoder_p
+        P_align, _ = torch.split(multi_feature, split_size_or_sections=self.N_p, dim=1)         #[B, N_p, C] --- [B, N_i, C]
+        F_pa, _ = torch.split(affordance_feature, split_size_or_sections = self.N_p, dim=1)     #[B, N_p, C] --- [B, N_i, C]
+
+        up_sample = self.fp3(p_2[0], p_3[0], p_2[1], P_align.mT)                                #[B, emb_dim, npoint_sa2]
+        up_sample = self.fp2(p_1[0], p_2[0], p_1[1], up_sample)                                 #[B, emb_dim, npoint_sa1]                        
+        up_sample = self.fp1(p_0[0], p_1[0], torch.cat([p_0[0], p_0[1]],1), up_sample)          #[B, emb_dim, N_raw]
+        F_pa_pool = self.pool(F_pa.mT)                                                          #[B, emb_dim, 1]
+        
+        affordance = up_sample * F_pa_pool.expand(-1,-1,self.N_raw)                             #[B, emb_dim, 2048]
+        
+        out = self.out_head(affordance.mT)                                                      #[B, 2048, 1]
+
+        return out
+```
 
 
 
