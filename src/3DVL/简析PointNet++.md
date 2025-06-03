@@ -818,5 +818,89 @@ class PointNetFeaturePropagation(nn.Module):
 
 - new_points: 每个原始点都有了一个新的特征向量 [B, D', N]
 
+#### 点云语义分割模型
 
+下面给出的是一个**基于 PointNet++**的点云语义分割模型定义 ，其主要功能是：
 
+- 对输入点云中的每个点进行分类（如桌子、椅子、地板等），输出每个点的类别概率。 
+
+网络结构特点：
+
+- 使用 Set Abstraction（SA）层 进行多尺度特征提取和下采样；
+
+- 使用 Feature Propagation（FP）层 进行特征插值和上采样；
+
+- 最后通过两个卷积层输出每个点的分类结果；
+
+- 输出为 [B, N, num_classes]，即每个点都有一个类别预测。
+
+```python
+class get_model(nn.Module):
+    def __init__(self, num_classes):
+        """
+        初始化 PointNet++ 分割网络
+
+        参数：
+            num_classes: 分类类别数
+        """
+        super(get_model, self).__init__()
+
+        # Set Abstraction 层（编码器部分）
+        # 每层逐步下采样，并提取更高级别的局部特征
+        self.sa1 = PointNetSetAbstraction(npoint=1024, radius=0.1, nsample=32, in_channel=9+3, mlp=[32, 32, 64], group_all=False)
+        self.sa2 = PointNetSetAbstraction(npoint=256, radius=0.2, nsample=32, in_channel=64+3, mlp=[64, 64, 128], group_all=False)
+        self.sa3 = PointNetSetAbstraction(npoint=64, radius=0.4, nsample=32, in_channel=128+3, mlp=[128, 128, 256], group_all=False)
+        self.sa4 = PointNetSetAbstraction(npoint=16, radius=0.8, nsample=32, in_channel=256+3, mlp=[256, 256, 512], group_all=False)
+
+        # Feature Propagation 层（解码器部分）
+        # 从稀疏点恢复到原始点密度，逐层融合上下文信息
+        self.fp4 = PointNetFeaturePropagation(in_channel=768, mlp=[256, 256])
+        self.fp3 = PointNetFeaturePropagation(in_channel=384, mlp=[256, 256])
+        self.fp2 = PointNetFeaturePropagation(in_channel=320, mlp=[256, 128])
+        self.fp1 = PointNetFeaturePropagation(in_channel=128, mlp=[128, 128, 128])
+
+        # 最终分类头
+        self.conv1 = nn.Conv1d(128, 128, 1)
+        self.bn1 = nn.BatchNorm1d(128)
+        self.drop1 = nn.Dropout(0.5)
+        self.conv2 = nn.Conv1d(128, num_classes, 1)
+
+    def forward(self, xyz):
+        """
+        前向传播函数
+
+        输入：
+            xyz: 点云数据，形状 [B, C, N]
+
+        返回：
+            x: 每个点的分类结果，形状 [B, N, num_classes]
+            l4_points: 最后一层抽象特征，用于其他任务
+        """
+        # l0 表示最原始的点云
+        l0_points = xyz
+        l0_xyz = xyz[:, :3, :]  # 只取 xyz 坐标，不带法向量或其他属性
+
+        # 编码器：层层下采样并提取特征
+        l1_xyz, l1_points = self.sa1(l0_xyz, l0_points)  # 1024 points
+        l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)  # 256 points
+        l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)  # 64 points
+        l4_xyz, l4_points = self.sa4(l3_xyz, l3_points)  # 16 points
+
+        # 解码器：层层插值并融合特征
+        l3_points = self.fp4(l3_xyz, l4_xyz, l3_points, l4_points)  # 64 → 64
+        l2_points = self.fp3(l2_xyz, l3_xyz, l2_points, l3_points)  # 256 → 256
+        l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points)  # 1024 → 1024
+        l0_points = self.fp1(l0_xyz, l1_xyz, None, l1_points)       # 4096 → 4096
+
+        # MLP 头部处理：进一步增强特征
+        x = self.drop1(F.relu(self.bn1(self.conv1(l0_points)), inplace=True))  # [B, 128, N]
+        x = self.conv2(x)  # [B, num_classes, N]
+
+        # Softmax 分类
+        x = F.log_softmax(x, dim=1)  # [B, num_classes, N]
+
+        # 调整维度，返回 [B, N, num_classes]
+        x = x.permute(0, 2, 1)
+
+        return x, l4_points  # 返回每个点的分类结果和抽象特征
+```    
