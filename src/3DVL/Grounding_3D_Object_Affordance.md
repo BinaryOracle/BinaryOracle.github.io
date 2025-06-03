@@ -120,7 +120,8 @@ class LMAffordance3D(Blip2Base):
         # 通过适配器层将 LLM 输出映射回合适维度
         hidden_states = self.adapter_down(hidden_states)  # shape: [B, NS + NL, CS]
 
-        # 分割出 instructional feature 和 semantic feature
+        # 分割出 semantic feature 和 instructional feature
+        # 视觉语义特征 和 语言指令理解特征
         semantic_feature, instructional_feature = torch.split(
             hidden_states, 
             split_size_or_sections=spatial_feature.size(1), 
@@ -323,8 +324,118 @@ def concat_input(self, input_embeds, input_atts, multi_embeds, image_atts=None):
         )
 ```
 
+### Step 9: 解码器融合所有特征以预测可操作性特征
 
+```python
+class Affordance_Decoder(nn.Module):
+    def __init__(self, emb_dim, proj_dim):
+        super().__init__()
+        self.emb_dim = emb_dim
+        self.proj_dim = proj_dim
+        self.cross_atten = Cross_Attention(emb_dim = self.emb_dim, proj_dim = self.proj_dim)
+        self.fusion = nn.Sequential(
+            nn.Conv1d(2*self.emb_dim, self.emb_dim, 1, 1),
+            nn.BatchNorm1d(self.emb_dim),
+            nn.ReLU()
+        )
 
+    def forward(self, query, key, value):
+        '''
+        query: [B, N_p + N_i, C]   -> spatial_feature (query)
+        key:   [B, N_l, C]         -> instructional_feature (key)
+        value: [B, N_l, C]         -> semantic_feature (value)
+        '''
+        B, _, C = query.size()
+
+        # 调整 key 和 value 的形状为 [B, C, N_l]
+        key = key.view(B, C, -1)  # [B, C, N_l]
+        value = value.view(B, C, -1)  # [B, C, N_l]
+
+        # 使用 cross attention 获取两个注意力加权结果
+        Theta_1, Theta_2 = self.cross_atten(query, key.mT, value.mT)
+
+        # 将两个注意力输出拼接在一起
+        joint_context = torch.cat((Theta_1.mT, Theta_2.mT), dim=1)  # [B, 2C, N_p + N_i]
+
+        # 使用 Conv1D 融合通道信息
+        affordance = self.fusion(joint_context)  # [B, C, N_p + N_i]
+
+        # 调整输出格式为 [B, N_p + N_i, C]
+        affordance = affordance.permute(0, 2, 1)  # [B, N_p + N_i, C]
+
+        return affordance
+``` 
+```python
+class Cross_Attention(nn.Module):
+    def __init__(self, emb_dim, proj_dim):
+        """
+        多模态交叉注意力模块（Cross-Attention Module），
+        用于融合来自语言模型的不同语义信息，增强空间特征表达。
+
+        Args:
+            emb_dim: 输入特征维度（embedding dimension），例如 LLM 的 hidden size（如 4096）
+            proj_dim: 投影维度，用于降低计算复杂度，在 attention 中使用
+        """
+        super().__init__()
+        self.emb_dim = emb_dim
+        self.proj_dim = proj_dim
+
+        # 定义投影层，将输入映射到低维空间以进行 attention 计算
+        self.proj_q = nn.Linear(self.emb_dim, proj_dim)   # query 投影
+        self.proj_sk = nn.Linear(self.emb_dim, proj_dim)  # sub key 投影
+        self.proj_sv = nn.Linear(self.emb_dim, proj_dim)  # sub value 投影
+        self.proj_ek = nn.Linear(self.emb_dim, proj_dim)  # scene key 投影
+        self.proj_ev = nn.Linear(self.emb_dim, proj_dim)  # scene value 投影
+
+        # 缩放因子，用于 attention 分数归一化
+        self.scale = self.proj_dim ** (-0.5)
+
+        # 层归一化（LayerNorm），用于稳定训练过程
+        self.layernorm = nn.LayerNorm(self.emb_dim)
+
+    def forward(self, obj, sub, scene):
+        """
+        执行交叉注意力机制，融合不同来源的信息：
+        - obj: 空间特征（spatial feature），作为 query；
+        - sub: 指令理解特征（instructional feature），作为第一个 attention 的 key 和 value；
+        - scene: 视觉语义特征（semantic feature），作为第二个 attention 的 key 和 value；
+
+        Args:
+            obj: [B, N_p + HW, C] → spatial_feature（query 来源）
+            sub: [B, HW, C] → instructional_feature（key/value 来源之一）
+            scene: [B, HW, C] → semantic_feature（key/value 来源之二）
+
+        Returns:
+            I_1: 经过 attention 加权后的输出（第一分支）
+            I_2: 经过 attention 加权后的输出（第二分支）
+        """
+
+        B, seq_length, C = obj.size()  # 获取 batch size 和通道维度
+
+        # 将输入分别投影到低维空间，便于后续 attention 计算
+        query = self.proj_q(obj)                   # [B, N_q, proj_dim]
+        s_key = self.proj_sk(sub)                  # [B, N_i, proj_dim]
+        s_value = self.proj_sv(sub)                # [B, N_i, proj_dim]
+
+        e_key = self.proj_ek(scene)                # [B, N_e, proj_dim]
+        e_value = self.proj_ev(scene)              # [B, N_e, proj_dim]
+
+        # 第一个 cross attention：使用 sub 的 key 和 value 增强 query
+        atten_I1 = torch.bmm(query, s_key.mT) * self.scale  # [B, N_q, N_i]
+        atten_I1 = atten_I1.softmax(dim=-1)                 # softmax 归一化
+        I_1 = torch.bmm(atten_I1, s_value)                  # [B, N_q, proj_dim]
+
+        # 第二个 cross attention：使用 scene 的 key 和 value 增强 query
+        atten_I2 = torch.bmm(query, e_key.mT) * self.scale  # [B, N_q, N_e]
+        atten_I2 = atten_I2.softmax(dim=-1)
+        I_2 = torch.bmm(atten_I2, e_value)                 # [B, N_q, proj_dim]
+
+        # 使用残差连接 + LayerNorm 增强稳定性
+        I_1 = self.layernorm(obj + I_1)  # [B, N_q, emb_dim]
+        I_2 = self.layernorm(obj + I_2)  # [B, N_q, emb_dim]
+
+        return I_1, I_2
+```
 
 
 
