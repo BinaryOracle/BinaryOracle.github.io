@@ -441,44 +441,81 @@ class Cross_Attention(nn.Module):
 ```python
 class Head(nn.Module):
     def __init__(self, additional_channel, emb_dim, N_p, N_raw):
+        """
+        Head 模块用于最终的 3D 可操作性（affordance）预测。
+        它接收来自编码器和解码器的特征，并通过多尺度上采样与融合，
+        输出每个点云点的 affordance 热图（heatmap），表示该点是否具有可操作性。
+
+        Args:
+            additional_channel: 额外通道数，例如法向量、颜色等信息
+            emb_dim: 特征维度（embedding dimension）
+            N_p: point cloud token 数量（如 64）
+            N_raw: 原始点云数量（如 2048）
+
+        Notes:
+            - 使用 PointNetFeaturePropagation 进行逐级上采样；
+            - 结合全局池化增强语义表达；
+            - 最终使用 MLP + Sigmoid 输出每个点的 affordance score；
+        """
         super().__init__()
         
         self.emb_dim = emb_dim
-        self.N_p = N_p
-        self.N_raw = N_raw
-        #upsample
+        self.N_p = N_p         # point cloud token 数量
+        self.N_raw = N_raw     # 原始点云数量（如 2048）
+
+        # 多尺度上采样模块：PointNetFeaturePropagation
+        # fp3: 输入为 [512 + emb_dim]，输出为 512 维度
         self.fp3 = PointNetFeaturePropagation(in_channel=512+self.emb_dim, mlp=[768, 512])  
         self.fp2 = PointNetFeaturePropagation(in_channel=832, mlp=[768, 512]) 
         self.fp1 = PointNetFeaturePropagation(in_channel=518+additional_channel, mlp=[512, 512]) 
+
+        # 全局平均池化层，压缩时间/空间维度
         self.pool = nn.AdaptiveAvgPool1d(1)
 
+        # 最终输出头：MLP + BatchNorm + ReLU + Sigmoid
         self.out_head = nn.Sequential(
             nn.Linear(self.emb_dim, self.emb_dim // 8),
-            nn.BatchNorm1d(self.N_raw),
+            nn.BatchNorm1d(self.N_raw),      # 对点数维度做 BN
             nn.ReLU(),
-            nn.Linear(self.emb_dim // 8, 1),
-            nn.Sigmoid()
+            nn.Linear(self.emb_dim // 8, 1),  # 输出每个点的 affordance score
+            nn.Sigmoid()                     # 输出范围 [0,1]，表示概率
         )
 
     def forward(self, multi_feature, affordance_feature, encoder_p):
-        '''
-        multi_feature ---> [B, N_p + N_i, C]
-        affordance_feature ---> [B, N_p + N_i, C]
-        encoder_p ---> [Hierarchy feature]
-        '''
-        B,N,C = multi_feature.size()
-        p_0, p_1, p_2, p_3 = encoder_p
-        P_align, _ = torch.split(multi_feature, split_size_or_sections=self.N_p, dim=1)         #[B, N_p, C] --- [B, N_i, C]
-        F_pa, _ = torch.split(affordance_feature, split_size_or_sections = self.N_p, dim=1)     #[B, N_p, C] --- [B, N_i, C]
+        """
+        执行 Head 模块的前向传播，生成最终的 3D affordance heatmap。
 
-        up_sample = self.fp3(p_2[0], p_3[0], p_2[1], P_align.mT)                                #[B, emb_dim, npoint_sa2]
-        up_sample = self.fp2(p_1[0], p_2[0], p_1[1], up_sample)                                 #[B, emb_dim, npoint_sa1]                        
-        up_sample = self.fp1(p_0[0], p_1[0], torch.cat([p_0[0], p_0[1]],1), up_sample)          #[B, emb_dim, N_raw]
-        F_pa_pool = self.pool(F_pa.mT)                                                          #[B, emb_dim, 1]
-        
-        affordance = up_sample * F_pa_pool.expand(-1,-1,self.N_raw)                             #[B, emb_dim, 2048]
-        
-        out = self.out_head(affordance.mT)                                                      #[B, 2048, 1]
+        Args:
+            multi_feature:       [B, N_p + N_i, C] → 来自 Vision-Language Model 的拼接特征
+            affordance_feature:  [B, N_p + N_i, C] → 来自 decoder 的可操作性特征
+            encoder_p:           [p0, p1, p2, p3] → 编码器不同层级的点云特征
+
+        Returns:
+            out: [B, N_raw, 1] → 每个点的 affordance score（概率值）
+        """
+
+        B, N, C = multi_feature.size()
+
+        # 解包编码器输出的不同层级特征
+        p_0, p_1, p_2, p_3 = encoder_p
+
+        # 从 multi_feature 和 affordance_feature 中提取 point cloud token 部分
+        P_align, _ = torch.split(multi_feature, split_size_or_sections=self.N_p, dim=1)
+        F_pa, _ = torch.split(affordance_feature, split_size_or_sections=self.N_p, dim=1)
+
+        # 上采样过程：fp3 -> fp2 -> fp1
+        up_sample = self.fp3(p_2[0], p_3[0], p_2[1], P_align.mT)  # [B, emb_dim, npoint_sa2]
+        up_sample = self.fp2(p_1[0], p_2[0], p_1[1], up_sample)   # [B, emb_dim, npoint_sa1]
+        up_sample = self.fp1(p_0[0], p_1[0], torch.cat([p_0[0], p_0[1]], 1), up_sample)  # [B, emb_dim, N_raw]
+
+        # 对 F_pa 做全局池化，得到一个全局语义向量
+        F_pa_pool = self.pool(F_pa.mT)  # [B, emb_dim, 1]
+
+        # 将全局语义向量扩展回原始点云数量，实现 feature-wise attention
+        affordance = up_sample * F_pa_pool.expand(-1, -1, self.N_raw)  # [B, emb_dim, N_raw]
+
+        # 输出 head：将特征映射到 0~1 的概率值，表示每个点是否具有可操作性
+        out = self.out_head(affordance.mT)  # [B, N_raw, 1]
 
         return out
 ```
