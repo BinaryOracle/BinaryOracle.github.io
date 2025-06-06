@@ -2,9 +2,10 @@
 icon: file
 category:
   - 3D-VL
+  - 3D Affordance
 tag:
   - 3D-VL
-  - point cloud
+  - 3D Affordance
   - 编辑中
 footer: 技术共建，知识共享
 date: 2025-05-30
