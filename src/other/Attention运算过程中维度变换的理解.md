@@ -2,7 +2,7 @@
 title: Attention运算过程中维度变换的理解
 icon: file
 category:
-  - 开源项目
+  - Attention
 tag:
   - 已发布
 footer: 技术共建，知识共享
