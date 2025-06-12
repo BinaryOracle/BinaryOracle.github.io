@@ -263,3 +263,51 @@ PointRefer 包括以下核心模块：
    - 生成动态卷积核（dynamic kernels）；
    - 最终通过卷积操作生成分割掩码；
 
+![PointRefer模型结构图](LASO/5.png)   
+
+PointRefer 前向传播过程如下:
+
+```python
+class PointRefer(nn.Module):
+
+    # 传入question文本 和 point点云数据 
+    def forward(self, text, xyz):
+
+        '''
+        text: [B, L, 768]
+        xyz: [B, 3, 2048]
+        sub_box: bounding box of the interactive subject
+        obj_box: bounding box of the interactive object
+        '''
+         
+        B, C, N = xyz.size()
+        # 使用RoBert编码文本 ，使用PointNet++编码点云
+        t_feat, t_mask = self.forward_text(list(text), xyz.device)  # [batch, q_len, d_model]
+        F_p_wise = self.point_encoder(xyz)     
+
+        """ 
+        Decoding
+        """
+        p_0, p_1, p_2, p_3 = F_p_wise  # 每个局部区域点坐标点，每个局部区域特征
+        p_3[1] = self.gpb(t_feat, p_3[1].transpose(-2, -1)).transpose(-2, -1) # 每个区域特征充分和文本信息进行融合
+        up_sample = self.fp3(p_2[0], p_3[0], p_2[1], p_3[1])   #[B, emb_dim, npoint_sa2] 特征传播
+
+        up_sample = self.gpb(t_feat, up_sample.transpose(-2, -1)).transpose(-2, -1)
+        up_sample = self.fp2(p_1[0], p_2[0], p_1[1], up_sample)    #[B, emb_dim, npoint_sa1]   
+        
+        up_sample = self.gpb(t_feat, up_sample.transpose(-2, -1)).transpose(-2, -1)         
+        up_sample = self.fp1(p_0[0], p_1[0], torch.cat([p_0[0], p_0[1]],1), up_sample)  #[B, emb_dim, N]
+
+        # t_feat = t_feat.sum(1)/(t_mask.float().sum(1).unsqueeze(-1))
+        # t_feat = t_feat.unsqueeze(1).repeat(1, self.n_groups,1)
+        # t_feat += self.pos1d
+
+        # print(t_feat.shape, up_sample.shape)
+        t_feat = self.decoder(t_feat, up_sample.transpose(-2, -1), tgt_key_padding_mask=t_mask, query_pos=self.pos1d) # b,l,c
+        t_feat *= t_mask.unsqueeze(-1).float()
+        _3daffordance = torch.einsum('blc,bcn->bln', t_feat, up_sample)
+        _3daffordance = _3daffordance.sum(1)/(t_mask.float().sum(1).unsqueeze(-1))
+        _3daffordance = torch.sigmoid(_3daffordance)
+        # logits = self.cls_head(p_3[1].mean(-1))
+        return _3daffordance.squeeze(-1)
+```
