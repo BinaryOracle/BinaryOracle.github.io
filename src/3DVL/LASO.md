@@ -153,7 +153,7 @@ class AffordQ(Dataset):
         
         afford_cl = ['lay','sit','support','grasp','lift','contain','open','wrap_grasp','pour', 
                      'move','display','push','pull','listen','wear','press','cut','stab']
-        
+        # 建立物体类型和功能类型的索引映射关系，神经网络模型只认识数字 
         self.cls2idx = {cls.lower():np.array(i).astype(np.int64) for i, cls in enumerate(classes)}
         self.aff2idx = {cls:np.array(i).astype(np.int64) for i, cls in enumerate(afford_cl)}
         # 加载标注数据
@@ -214,18 +214,21 @@ class AffordQ(Dataset):
         # 对点云数据进行转置操作 ，（3,2048)
         point_set = point_set.transpose()
 
-        #     
+        # 获取当前样本对应的问题文本(训练: 随机选； 验证&测试: 固定返回问题0)
         question = self.find_rephrase(self.question_df, cls, affordance)
+        # 获取当前功能类型对应的索引值
         affordance = self.aff2idx[affordance]
 
+        # 返回: 点云数据， 物体类别索引， 功能区域掩码， 问题文本， 功能类型索引
         return point_set, self.cls2idx[cls], gt_mask, question, affordance
 
     def find_rephrase(self, df, object_name, affordance):
         # 如果当前是训练模式，则从问题1～15中随机选择一个问题，否则固定返回问题0
         qid = str(np.random.randint(1, 15)) if self.split == 'train' else '0'
         qid = 'Question'+qid
-        # 
+        # 从 DataFrame df 中筛选出同时满足 物体名称匹配 和 功能属性匹配 的行，并仅保留 qid 指定的列，也就是取出上面随机选择的问题文本
         result = df.loc[(df['Object'] == object_name) & (df['Affordance'] == affordance), [qid]]
+        # 问题文本不为空，则返回该问题文本
         if not result.empty:
             # return result.index[0], result.iloc[0]['Rephrase']
             return result.iloc[0][qid]
