@@ -557,5 +557,48 @@ AFM 的网络结构可视化理解
 
 结果表明：加入 AFM 显著提升了所有指标，说明其确实有效增强了语言-视觉的跨模态交互能力。
 
+### RPO 参考点解码器
+
+Referred Point Decoder（RPD）是 LASO 任务中用于生成功能区域掩码的核心模块。 
+
+它的主要目标是：
+
+- 利用一组问题条件化的 affordance queries 通过 Transformer 解码器与点云特征交互 ，生成一组动态卷积核（dynamic kernels），最终通过这些 kernel 对 AFM 增强后的点特征进行卷积，得到分割掩码。
+
+```python
+class TransformerDecoderLayer(nn.Module):
+    
+    # tgt: text feature (b,l,c),  memory: up_sample (b,n,c)
+    def forward(self, tgt, memory,
+                tgt_mask: Optional[Tensor] = None,
+                memory_mask: Optional[Tensor] = None,
+                tgt_key_padding_mask: Optional[Tensor] = None,
+                memory_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                query_pos: Optional[Tensor] = None):
+        # 1. Affordance Query = 问题嵌入（Question Embedding）X + 可学习的位置编码（Learnable Position Embeddings）
+        # 这里tgt就是Roberta编码得到的文本特征嵌入向量
+        q = k = self.with_pos_embed(tgt, query_pos)
+        # 2. 自注意力机制: 让每个 query 不仅理解自己的语义，还能感知其他 query 的信息，从而形成更完整的语言上下文理解。
+        tgt2 = self.self_attn(q, k, value=tgt, attn_mask=tgt_mask,
+                              key_padding_mask=tgt_key_padding_mask)
+        tgt = tgt + self.dropout1(tgt2)
+        tgt = self.norm1(tgt) # (b,l,c)
+         
+         # 3. 跨模态注意力机制: 每个 affordance query 都会基于其语言语义，从点云中找出最相关的功能区域，从而为后续的动态卷积和掩码预测提供基础。
+        tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos),
+                                   key=self.with_pos_embed(memory, pos),
+                                   value=memory, attn_mask=memory_mask,
+                                   key_padding_mask=memory_key_padding_mask,
+                                   output_attentions = True)
+        tgt = tgt + self.dropout2(tgt2)
+        tgt = self.norm2(tgt) # (b,l,c)
+        
+        # 4. MLP: 每个query通道维度做特征融合
+        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt)))) 
+        tgt = tgt + self.dropout3(tgt2)
+        tgt = self.norm3(tgt) # (b,l,c)
+        return tgt
+```
 
 
