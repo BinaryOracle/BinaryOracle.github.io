@@ -240,3 +240,26 @@ class AffordQ(Dataset):
 
 LASO 数据集基于 3D-AffordanceNet 的点云和功能标注，结合人工+GPT-4 生成的多样化问题，构造出 19,751 个点云-问题配对，旨在实现语言引导下的 3D 功能区域分割，推动 3D 视觉与大语言模型（LLM）的深度融合。
 
+## 模型实现
+
+论文提出了一个全新的模型：**PointRefer**，用于解决一个新颖的任务 —— **语言引导的 3D 对象功能区域分割（LASO）**。
+
+模型目标： 给定一个 3D 点云对象和一个自然语言问题（例如：“Where would you grasp this mug?”），PointRefer 的目标是预测出与该问题相关的点云区域，即生成一个二值掩码，表示哪些点属于目标功能区域。
+
+PointRefer 包括以下核心模块：
+
+1. **3D 骨干网络（3D Backbone）**
+   - 使用 PointNet++ 编码点云特征；
+   - 多阶段编码-解码结构提取多尺度点特征；
+
+2. **自适应融合模块（Adaptive Fusion Module, AFM）**
+   - 在不同解码层注入语言信息；
+   - 实现语言引导下的跨模态融合；
+   - 增强点特征的语义判别能力；
+
+3. **参考点解码器（Referred Point Decoder, RPD）**
+   - 引入一组可学习的“问题条件化查询”（affordance queries）；
+   - 利用 Transformer 解码器将这些查询与点云特征进行交互；
+   - 生成动态卷积核（dynamic kernels）；
+   - 最终通过卷积操作生成分割掩码；
+
