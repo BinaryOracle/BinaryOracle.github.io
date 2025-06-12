@@ -606,9 +606,9 @@ class PointRefer(nn.Module):
     def forward(self, text, xyz):
         ...
         #  3. Referred Point Decoding过程
-        #  3.1 利用一组问题条件化的 affordance queries 通过 Transformer 解码器与点云特征交互 ，生成一组动态卷积核（dynamic kernels）
+        #  3.1 利用一组问题条件化的 affordance queries 通过 Transformer 解码器与点云特征交互 ，生成一组动态卷积核（dynamic kernels）(b,l,c)
         t_feat = self.decoder(t_feat, up_sample.transpose(-2, -1), tgt_key_padding_mask=t_mask, query_pos=self.pos1d)
-        #  3.2 对无效 token（padding）做掩码操作，防止其影响后续计算。
+        #  3.2 对无效 token（padding）做掩码操作，防止其影响后续计算。 (b,l,c)
         t_feat *= t_mask.unsqueeze(-1).float()
         #  3.3 执行 动态卷积（Dynamic Convolution） 操作，用增强后的语言查询去“扫描”点云特征图 （b,l,n)
         _3daffordance = torch.einsum('blc,bcn->bln', t_feat, up_sample)
@@ -619,5 +619,58 @@ class PointRefer(nn.Module):
         return _3daffordance # (b,n)
 ```
 
+> PyTorch 的 `einsum` 函数，它是一个非常强大且灵活的张量操作函数，支持**通过爱因斯坦求和约定（Einstein Summation Convention）** 来表达各种线性代数运算。
 
+下面详细介绍一下动态卷机核卷积的过程:
 
+- t_feat: 语言查询特征 , 形状：`(B, L, C)` , 这是 **经过 Referred Point Decoder (RPD)** 处理后的 affordance queries，表示每个 token 对应的“动态卷积核”。
+
+- up_sample: 上采样后的点云特征 , 形状：`(B, C, N)`。
+
+而下面这行代码实现的是一个 **动态卷积（Dynamic Convolution）** 操作：
+
+```python
+_3daffordance = torch.einsum('blc,bcn->bln', t_feat, up_sample)
+```
+
+它的本质是： **用一组由语言引导的动态卷积核 `t_feat` 去卷积点云特征 `up_sample`，得到每个 token 对每个点的关注响应。**
+
+详细解释 einsum 表达式:
+
+```python
+torch.einsum('blc,bcn->bln', t_feat, up_sample)
+```
+
+| 维度 | 含义 |
+|------|------|
+| `b` | batch 维度，保持不变 |
+| `l` | token 维度，保留下来 |
+| `c` | 特征通道维度，进行内积操作（求和） |
+| `n` | 点云维度，保留下来 |
+
+所以这个表达式的含义是：
+
+$$
+\text{output}[b, l, n] = \sum_c \text{t\_feat}[b, l, c] \cdot \text{up\_sample}[b, c, n]
+$$
+
+也就是说，对于每一个 batch 中的数据：
+- 每个 token（`l`）都与所有点（`n`）交互；
+- 每个 token 实际上是一个动态生成的卷积核（`C × 1 × 1`），作用于点云特征图（`C × N`）；
+- 最终输出形状为 `(B, L, N)`，表示：
+  - 每个 token 对每个点的关注程度；
+
+| 输出张量 | 形状 | 含义 |
+|----------|------|------|
+| `_3daffordance` | `(B, L, N)` | 每个 token 对每个点的响应值（得分） |
+
+然后在后续会进行如下处理：
+
+```python
+_3daffordance = _3daffordance.sum(1) / (t_mask.float().sum(1).unsqueeze(-1))
+_3daffordance = torch.sigmoid(_3daffordance)
+```
+即：
+- 在 token 维度求和（或平均池化），融合多个 token 的关注信息；
+- 使用 sigmoid 得到最终的掩码，形状 `(B, N)`；
+- 每个点的值 ∈ [0, 1]，表示其属于目标功能区域的概率；
