@@ -319,32 +319,109 @@ class PointRefer(nn.Module):
 
 ### AFM 自适应融合模块
 
-```python
-class GPBlock(nn.Module):
-    # q: 文本特征 (b, l, c) ， x: 点集特征集合 (b, n, c)
-    def forward(self, q, x, q_mask=None):
-        # 1. 注意力: 文本特征作为query，从点集特征集合中提取相关区域特征
-        gt = self.group_layer(query=q, key=x, value=x)
-        if q_mask is not None:
-            gt *= q_mask.unsqueeze(-1)
-        # 2.  MLP: 做token维度和channel维度的信息融合
-        gt = self.mixer(gt) + self.drop(gt)
-        ungroup_tokens = self.un_group_layer(query=x, key=gt, value=gt, key_padding_mask=q_mask)
-        return ungroup_tokens
+在 LASO 任务中，模型需要根据自然语言问题（如 “Where to grasp?”）识别点云中的功能区域。由于目标功能区域的尺度、形状多样，传统方法难以适应不同情况。为此，作者设计了 AFM 模块，以增强 PointNet++ 解码过程中点特征的语言引导能力。
 
+AFM 的目标是：在不同解码阶段注入语言线索（text clues），将文本语义信息与点云特征进行跨模态融合，逐步以自上而下的方式细化点特征图，从而提升模型对多尺度、多形状的功能区域的感知能力。
+
+AFM 遵循一个 **瓶颈式架构（bottleneck architecture）**，包含三个关键步骤：
+
+1. **Grouping（分组）**
+2. **Mixing（混合）**
+3. **Ungrouping（解组）**
+
+这三个步骤构成了一个完整的跨模态融合流程。
+
+#### 1️⃣ Grouping：文本引导的点特征分组
+
+输入：
+- `X ∈ R^{L×d}`：问题编码后的文本特征（由 RoBERTa 编码得到）
+- `P ∈ R^{T×d}`：某一层解码器输出的点特征，其中 T 表示该层点数
+
+处理过程：
+- 使用一个轻量级的交叉注意力模块，将文本特征作为查询（query），点特征作为键（key）和值（value），输出分组标记 G：
+
+$$
+G = \text{Attention}(X, W_1P, P) + X
+$$
+$$
+\text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{QK^T}{\sqrt{d}}\right)V
+$$
+
+其中：
+- $W_1$ 是一个线性变换；
+- 注意力机制使得每个文本 token 对应一组相关的点特征；
+- 分组操作实现了“语言引导的点特征筛选”。
+
+> 重点是如何理解这里的分组: 每个文本Token询问所有点Key后，知道了哪些点跟自身的相关度更大，因此加权融合的时候，侧重于给这些点的特征分配更大的融合权重。
+
+这部分代码实现如下:
+
+```python
 # group_layer 的实现
 class LightGroupAttnBlock(nn.Module):
-
+    
+    # query 是RoBerta编码后的文本特征 , (b,l,c)
+    # key和value都是点云特征 , (b,n,c)
     def forward(self, query, key, value, q_mask=None):
         def _inner_forward(query, key, value):
             q = self.norm_query(query)
             k = q if self.key_is_query else self.norm_key(key)
             v = k if self.value_is_key else self.norm_value(value)
-            x = self.attn(q, k, v, q_mask) + self.drop(q) # 残差连接
+            # 让每个语言 token 去关注点云中最相关的区域，并在此基础上强化自身的语义表达。
+            # 加上原始 X 是一种残差连接（Residual Connection），可以确保语言语义不会丢失。
+            x = self.attn(q, k, v, q_mask) + self.drop(q) 
             return x
-
+        
         return _inner_forward(query, key, value)
+```
 
+---
+
+#### 2️⃣ Mixing：MLP-Mixer 进行组内和通道间的信息混合
+
+MLP-Mixer 是一种 基于 MLP（多层感知机）的视觉模型架构 ，由 Google Research 在 2021 年提出。它不使用任何注意力机制，而是通过 空间混合（mixing）和通道混合（mixing）操作 来实现全局信息建模。
+
+> [MLP-Mixer: An all-MLP Architecture for Vision](https://arxiv.org/abs/2105.01601)
+
+MLP-Mixer 的核心思想是：用 MLP 替代 Transformer 中的自注意力机制 ，从而减少计算复杂度并保持性能。
+
+1. Token-mixing MLP
+
+- 对所有点/patch 的相同通道进行混合；
+- 相当于跨空间位置的信息交换；
+- 类似于 CNN 中的空间卷积；
+
+2. Channel-mixing MLP
+
+- 对每个 token 的所有通道进行处理；
+- 提取更高级的特征表示；
+- 类似于传统的全连接层或 1x1 卷积；
+
+这两个操作交替进行，形成一个类似于 Transformer 的堆叠结构，但完全不使用注意力机制。
+
+输入：
+- `G ∈ R^{L×d}`：分组后的文本引导特征
+
+处理过程：
+
+- 使用 MLP-Mixer 来更新分组特征，生成融合特征 F：
+
+$$
+G' = G + \text{MLP}_1(G^T)^T
+$$
+$$
+F = G' + \text{MLP}_2(G')
+$$
+
+其中：
+- `MLP₁` 负责组内信息混合（token 内部）；
+- `MLP₂` 负责通道间信息混合（feature channel）；
+- 两个 MLP 交替作用，实现跨模态信息的充分交互；
+- 最终输出融合特征 `F`；
+
+这部分代码实现如下:
+
+```python
 # mixer 的实现
 class MLPMixerLayer(nn.Module):
     def __init__(self,
@@ -378,13 +455,107 @@ class MLPMixerLayer(nn.Module):
 
         self.norm1 = nn.LayerNorm(embed_dims)
         self.norm2 = nn.LayerNorm(embed_dims)
-
+    
+    # x 分组后的文本引导特征 : (b,l,c)
     def forward(self, x):
-        # x_mask = (x.sum(-1)!=0).to(x.dtype)
+        # x 转置后: (b,c,l) , patch_mixer 负责组内信息混合（token 内部）
         x = x + self.patch_mixer(self.norm1(x).transpose(1,2)).transpose(1,2)
+        # channel_mixer 负责通道间信息混合（feature channel) 
         x = x + self.channel_mixer(self.norm2(x))
-        # x *= x_mask
         return x
 ```
+---
+
+#### 3️⃣ Ungrouping：将融合特征映射回点空间
+
+输入：
+
+- 原始点特征 `P`；
+- 融合后的文本特征 `F`；
+
+处理过程：
+
+- 使用另一个注意力模块，将融合特征重新分配给每个点：
+
+$$
+P_m = \text{Attention}(P, W_2F, F) + P
+$$
+
+其中：
+- `W₂` 是线性变换；
+- 注意力机制让每个点从融合特征中提取相关信息；
+- 输出 `P_m` 是语言增强后的点特征；
+- 最后加上残差连接形成最终输出 `P_o`：
+
+$$
+P_o = P_m + \text{residual}
+$$
+
+这个 `P_o` 就是经过 AFM 增强的点特征图，用于后续分割掩码预测。
+
+```python
+class FullAttnCatBlock(nn.Module):
+    # query 为点云: (b,n,c) , key和value为融合后的文本特征: (b,l,c)
+    def forward(self, query, key, value, key_padding_mask=None):
+        def _inner_forward(query, key, value, key_padding_mask):
+            q = self.norm_query(query)
+            k = q if self.key_is_query else self.norm_key(key)
+            v = k if self.value_is_key else self.norm_value(value)
+            
+            # 使用另一个注意力模块，将融合特征重新分配给每个点
+            x = self.attn(q, k, v, key_padding_mask) + self.drop(query)
+            # MLP映射 + Residual Connection
+            x = self.ffn(self.norm2(x)) + x
+            return x
+        
+        return _inner_forward(query, key, value, key_padding_mask)
+```
+---
+#### 4️⃣ AFM 自适应融合模块
+
+有了以上 Grouping - Mixing - Ungrouping 三个关键步骤的实现，下面只需要把以上的三个步骤按流程组织起来即可得到AFM模块的完整实现了:
+
+```python
+class GPBlock(nn.Module):
+    # q: 文本特征 (b, l, c) ， x: 点集特征集合 (b, n, c)
+    def forward(self, q, x, q_mask=None):
+        # Grouping阶段
+        gt = self.group_layer(query=q, key=x, value=x)
+        if q_mask is not None:
+            gt *= q_mask.unsqueeze(-1)
+        # Mixing阶段
+        gt = self.mixer(gt) + self.drop(gt)
+        # Ungrouping阶段
+        ungroup_tokens = self.un_group_layer(query=x, key=gt, value=gt, key_padding_mask=q_mask)
+        return ungroup_tokens
+```
+
+AFM 的网络结构可视化理解
+
+```
+文本特征 X ──┐
+             ↓
+           Grouping (Cross-Attention)
+             ↓
+           Mixing (MLP-Mixer)
+             ↓
+          Ungrouping (Attention)
+             ↓
+        输出增强后的点特征 P_o
+```
+
+- **Grouping**：用语言引导点特征分组；
+- **Mixing**：在分组内进行信息交换；
+- **Ungrouping**：再将融合信息返回点空间；
+
+这种设计使得语言信息能有效地指导点特征的学习过程，论文中也进行了大量消融实验来验证 AFM 的有效性：
+
+| 模型变体 | mIoU | AUC | SIM | MAE |
+|----------|-------|-----|-----|-----|
+| 基线（不加 AFM） | 17.7 | 82.1 | 0.558 | 0.110 |
+| 加入 AFM 后 | **20.8** | **87.3** | **0.629** | **0.093** |
+
+结果表明：加入 AFM 显著提升了所有指标，说明其确实有效增强了语言-视觉的跨模态交互能力。
+
 
 
