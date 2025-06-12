@@ -156,19 +156,15 @@ class AffordQ(Dataset):
         
         self.cls2idx = {cls.lower():np.array(i).astype(np.int64) for i, cls in enumerate(classes)}
         self.aff2idx = {cls:np.array(i).astype(np.int64) for i, cls in enumerate(afford_cl)}
-
+        # 加载标注数据
         with open(os.path.join(data_root, f'anno_{split}.pkl'), 'rb') as f:
             self.anno = pickle.load(f)
-        
+        # 加载点云数据
         with open(os.path.join(data_root, f'objects_{split}.pkl'), 'rb') as f:
             self.objects = pickle.load(f)
 
-        # Load the CSV file, and use lower case
+        # 加载58种物体-功能组合的标注数据
         self.question_df = pd.read_csv(os.path.join(data_root, 'Affordance-Question.csv'))
-    
-        self.len = len(self.anno)
-       
-        print(f"load {split} set successfully, lenth {len(self.anno)}")
 
         # sort anno by object class and affordance type
         self.sort_anno ={}
@@ -180,34 +176,15 @@ class AffordQ(Dataset):
                 self.sort_anno[key] = [value]
             else:
                 self.sort_anno[key].append(value)
-
-
-    def find_rephrase(self, df, object_name, affordance):
-        qid = str(np.random.randint(1, 15)) if self.split == 'train' else '0'
-        qid = 'Question'+qid
-        result = df.loc[(df['Object'] == object_name) & (df['Affordance'] == affordance), [qid]]
-        if not result.empty:
-            # return result.index[0], result.iloc[0]['Rephrase']
-            return result.iloc[0][qid]
-        else:
-            raise NotImplementedError
-            
-         
-    def __getitem__(self, index):
-        data = self.anno[index]            
-        shape_id = data['shape_id']
-        cls = data['class']
-        affordance = data['affordance']
-        gt_mask = data['mask']
-        point_set = self.objects[str(shape_id)]
-        point_set,_,_ = pc_normalize(point_set)
-        point_set = point_set.transpose()
-            
-        question = self.find_rephrase(self.question_df, cls, affordance)
-        affordance = self.aff2idx[affordance]
-
-        return point_set, self.cls2idx[cls], gt_mask, question, affordance     
 ```
+加载的标注数据中每个样本的组织形式如下:
+- shape_id ：点云ID
+- class ：物体类别（如bed）
+- affordance ：功能类别（如lay）
+- mask ：功能区域掩码（点级别标注）
+
+![标注数据组织形式](LASO/2.png)   
+
 
 ### 8. 总结
 
