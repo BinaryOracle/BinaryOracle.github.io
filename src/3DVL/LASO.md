@@ -674,3 +674,145 @@ _3daffordance = torch.sigmoid(_3daffordance)
 - 在 token 维度求和（或平均池化），融合多个 token 的关注信息；
 - 使用 sigmoid 得到最终的掩码，形状 `(B, N)`；
 - 每个点的值 ∈ [0, 1]，表示其属于目标功能区域的概率；
+
+## 训练
+
+训练部分的核心代码实现如下:
+
+```python
+def main(opt, dict):
+    # 1. 加载训练集，验证集，测试集
+    train_dataset = AffordQ('train')
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, num_workers=8 ,shuffle=True, drop_last=True)
+    val_dataset = AffordQ('val')
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=8, shuffle=False)
+    test_dataset = AffordQ('test')
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=8, shuffle=False)
+    
+    # 2. 初始化模型
+    model = get_PointRefer(emb_dim=dict['emb_dim'],
+                       proj_dim=dict['proj_dim'], num_heads=dict['num_heads'], N_raw=dict['N_raw'],
+                       num_affordance = dict['num_affordance'], n_groups=opt.n_groups)
+     
+    # 3. 初始化损失函数，优化器，学习率调度器
+    criterion_hm = HM_Loss()
+    criterion_ce = nn.CrossEntropyLoss()
+    param_dicts = [
+    {"params": [p for n, p in model.named_parameters() if "text_encoder" not in n and p.requires_grad]},
+    {"params": [p for n, p in model.named_parameters() if "text_encoder" in n and p.requires_grad], "lr": opt.tlr}]
+    optimizer = torch.optim.Adam(params = param_dicts, lr=dict['lr'], betas=(0.9, 0.999), eps=1e-8, weight_decay=opt.decay_rate)
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=dict['Epoch'], eta_min=1e-6)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+    
+    '''
+    Training
+    '''
+    for epoch in range(start_epoch+1, dict['Epoch']):
+        num_batches = len(train_loader)
+        loss_sum = 0
+        total_point = 0
+        model = model.train()
+
+        for i,(point, cls, gt_mask, question, aff_label) in enumerate(train_loader):
+            optimizer.zero_grad()      
+            # 4. 前向传播过程
+            _3d = model(question, point)
+            # 5. 计算损失
+            loss_hm = criterion_hm(_3d, gt_mask)
+            # loss_ce = criterion_ce(logits, cls)
+
+            temp_loss = loss_hm # + opt.loss_cls*loss_ce
+            temp_loss.backward()
+            optimizer.step()
+        
+        results = torch.zeros((len(val_dataset), 2048, 1))
+        targets = torch.zeros((len(val_dataset), 2048, 1))
+
+        '''
+        Evalization
+        '''
+        if((epoch+1)%1 == 0):
+            num = 0
+            with torch.no_grad():
+                num_batches = len(val_loader)
+                val_loss_sum = 0
+                total_MAE = 0
+                total_point = 0
+                model = model.eval()
+                for i,(point, _, label, question,aff_label) in enumerate(val_loader):
+                    point, label = point.float(), label.float()
+                   
+                    _3d = model(question, point)
+                    mae, point_nums = evaluating(_3d, label)
+                    total_point += point_nums
+                    # val_loss_sum += val_loss.item()
+                    total_MAE += mae.item()
+                    pred_num = _3d.shape[0]
+                    # print(f'---val_loss | {val_loss.item()}')
+                    results[num : num+pred_num, :, :] = _3d.unsqueeze(-1)
+                    targets[num : num+pred_num, :, :] = label.unsqueeze(-1)
+                    num += pred_num
+
+                # val_mean_loss = val_loss_sum / num_batches
+                # logger.debug(f'Epoch_{epoch} | val_loss | {val_mean_loss}')
+                mean_mae = total_MAE / total_point
+                results = results.detach().numpy()
+                targets = targets.detach().numpy()
+                # print(f'cuda memorry:{torch.cuda.memory_allocated(opt.gpu)/ (1024*1024)}')
+                SIM_matrix = np.zeros(targets.shape[0])
+                for i in range(targets.shape[0]):
+                    SIM_matrix[i] = SIM(results[i], targets[i])
+
+                sim = np.mean(SIM_matrix)
+                AUC = np.zeros((targets.shape[0], targets.shape[2]))
+                IOU = np.zeros((targets.shape[0], targets.shape[2]))
+                IOU_thres = np.linspace(0, 1, 20)
+                targets = targets >= 0.5
+                targets = targets.astype(int)
+                for i in range(AUC.shape[0]):
+                    t_true = targets[i]
+                    p_score = results[i]
+
+                    if np.sum(t_true) == 0:
+                        AUC[i] = np.nan
+                        IOU[i] = np.nan
+                    else:
+                        auc = roc_auc_score(t_true, p_score)
+                        AUC[i] = auc
+
+                        p_mask = (p_score > 0.5).astype(int)
+                        temp_iou = []
+                        for thre in IOU_thres:
+                            p_mask = (p_score >= thre).astype(int)
+                            intersect = np.sum(p_mask & t_true)
+                            union = np.sum(p_mask | t_true)
+                            temp_iou.append(1.*intersect/union)
+                        temp_iou = np.array(temp_iou)
+                        aiou = np.mean(temp_iou)
+                        IOU[i] = aiou
+
+                AUC = np.nanmean(AUC)
+                IOU = np.nanmean(IOU)
+
+                logger.debug(f'AUC:{AUC} | IOU:{IOU} | SIM:{sim} | MAE:{mean_mae}')
+
+                current_IOU = IOU
+                if(current_IOU > best_IOU):
+                    best_IOU = current_IOU
+                    best_model_path = save_path + '/best_model-{}.pt'.format(sign)
+                    checkpoint = {
+                        'model': model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'Epoch': epoch
+                    }
+                    torch.save(checkpoint, best_model_path)
+                    logger.debug(f'best model saved at {best_model_path}')
+        scheduler.step()
+    logger.debug(f'Best Val IOU:{best_IOU}')
+
+    category_metrics, affordance_metrics, overall_metrics = evaluate(model, test_loader, device, 3)
+    print_metrics_in_table(category_metrics, affordance_metrics, overall_metrics, logger)
+```
+
+### 损失函数
+
