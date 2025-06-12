@@ -133,7 +133,7 @@ author:
 
 ### 7. 代码实现
 
-数据集加载的核心代码实现如下:
+**数据集初始化的核心代码实现如下:**
 
 ```python
 class AffordQ(Dataset):
@@ -163,18 +163,22 @@ class AffordQ(Dataset):
         with open(os.path.join(data_root, f'objects_{split}.pkl'), 'rb') as f:
             self.objects = pickle.load(f)
 
-        # 加载58种物体-功能组合的标注数据
+        # 加载58种物体-功能组合的标注数据 (数据组织形式，参考上文的 Affordance-Question数据可视化图)
         self.question_df = pd.read_csv(os.path.join(data_root, 'Affordance-Question.csv'))
 
-        # sort anno by object class and affordance type
+        # sort anno by object class and affordance type -- 遍历标注数据列表
         self.sort_anno ={}
         for item in sorted(self.anno, key=lambda x: x['class']):
+            # 获取当前样本的物体类别和物体信息值: 点云ID, 功能区域掩码, 功能类别
             key = item['class']
             value = {'shape_id': item['shape_id'], 'mask': item['mask'], 'affordance': item['affordance']}
             
+            # 每种物体可以对应多种形状实例和功能类别
             if key not in self.sort_anno:
+                # 如果当前物体类别不在排序后的字典中，直接添加
                 self.sort_anno[key] = [value]
             else:
+                # 如果当前物体类别在排序后的字典中，将当前样本的物体信息值追加到对应列表中
                 self.sort_anno[key].append(value)
 ```
 加载的标注数据中每个样本的组织形式如下:
@@ -185,6 +189,49 @@ class AffordQ(Dataset):
 
 ![标注数据组织形式](LASO/2.png)   
 
+![点云数据组织形式](LASO/3.png)   
+
+![每种物体可以对应多种形状实例和功能类别](LASO/4.png)   
+
+**获取样本的代码实现:**
+
+```python
+    def __getitem__(self, index):
+        # 根据样本索引取出样本数据
+        data = self.anno[index]    
+        # 获取当前样本对应的点云ID        
+        shape_id = data['shape_id']
+        # 获取当前样本对应的物体类别
+        cls = data['class']
+        #  获取当前样本对应的功能类型
+        affordance = data['affordance']
+        # 获取当前样本对应的功能区域掩码
+        gt_mask = data['mask']
+        # 取出当前样本对应的点云数据 ，（2048,3)
+        point_set = self.objects[str(shape_id)]
+        # 对点云数据进行归一化处理，消除尺度差异
+        point_set,_,_ = pc_normalize(point_set)
+        # 对点云数据进行转置操作 ，（3,2048)
+        point_set = point_set.transpose()
+
+        #     
+        question = self.find_rephrase(self.question_df, cls, affordance)
+        affordance = self.aff2idx[affordance]
+
+        return point_set, self.cls2idx[cls], gt_mask, question, affordance
+
+    def find_rephrase(self, df, object_name, affordance):
+        # 如果当前是训练模式，则从问题1～15中随机选择一个问题，否则固定返回问题0
+        qid = str(np.random.randint(1, 15)) if self.split == 'train' else '0'
+        qid = 'Question'+qid
+        # 
+        result = df.loc[(df['Object'] == object_name) & (df['Affordance'] == affordance), [qid]]
+        if not result.empty:
+            # return result.index[0], result.iloc[0]['Rephrase']
+            return result.iloc[0][qid]
+        else:
+            raise NotImplementedError
+```
 
 ### 8. 总结
 
