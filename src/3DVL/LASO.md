@@ -275,9 +275,7 @@ class PointRefer(nn.Module):
 
         '''
         text: [B, L, 768]
-        xyz: [B, 3, 2048]
-        sub_box: bounding box of the interactive subject
-        obj_box: bounding box of the interactive object
+        xyz: [B, 3, 2048] -- (b,c,n)
         '''
          
         B, C, N = xyz.size()
@@ -294,7 +292,7 @@ class PointRefer(nn.Module):
         p_0, p_1, p_2, p_3 = F_p_wise
 
         # 2.Backbone Decoding过程
-        # 2.1 点集集合中每个点的特征和文本特征信息进行融合
+        # 2.1 点集集合中每个点的特征和文本特征信息进行融合,传入的点集特征集合经过转置处理后的维度为: (b, n, c)
         p_3[1] = self.gpb(t_feat, p_3[1].transpose(-2, -1)).transpose(-2, -1)
         # 2.2 PointNet++ 特征传播阶段: 上采样过程中，上一层点集中的点特征重建过程中，充分吸收了高级区域抽象特征和文本特征
         up_sample = self.fp3(p_2[0], p_3[0], p_2[1], p_3[1])   #[B, emb_dim, npoint_sa2]
@@ -315,3 +313,78 @@ class PointRefer(nn.Module):
         # logits = self.cls_head(p_3[1].mean(-1))
         return _3daffordance.squeeze(-1)
 ```
+> 论文中所给的模型架构图中的Encoder layer指的是PointNet++中提供的PointNetSetAbstractionMsg多尺度分组点集特征抽取类
+
+> 论文中所给的模型架构图中的Decoder layer指的是PointNet++中提供的PointNetFeaturePropagation特征传播类
+
+### AFM 自适应融合模块
+
+```python
+class GPBlock(nn.Module):
+    # q: 文本特征 (b, l, c) ， x: 点集特征集合 (b, n, c)
+    def forward(self, q, x, q_mask=None):
+        # 1. 注意力: 文本特征作为query，从点集特征集合中提取相关区域特征
+        gt = self.group_layer(query=q, key=x, value=x)
+        if q_mask is not None:
+            gt *= q_mask.unsqueeze(-1)
+        # 2.  MLP: 做token维度和channel维度的信息融合
+        gt = self.mixer(gt) + self.drop(gt)
+        ungroup_tokens = self.un_group_layer(query=x, key=gt, value=gt, key_padding_mask=q_mask)
+        return ungroup_tokens
+
+# group_layer 的实现
+class LightGroupAttnBlock(nn.Module):
+
+    def forward(self, query, key, value, q_mask=None):
+        def _inner_forward(query, key, value):
+            q = self.norm_query(query)
+            k = q if self.key_is_query else self.norm_key(key)
+            v = k if self.value_is_key else self.norm_value(value)
+            x = self.attn(q, k, v, q_mask) + self.drop(q) # 残差连接
+            return x
+
+        return _inner_forward(query, key, value)
+
+# mixer 的实现
+class MLPMixerLayer(nn.Module):
+    def __init__(self,
+                 num_patches,
+                 embed_dims,
+                 patch_expansion,
+                 channel_expansion,
+                 drop_out,
+                 **kwargs):
+
+        super().__init__()
+
+        patch_mix_dims = int(patch_expansion * embed_dims) # 16
+        channel_mix_dims = int(channel_expansion * embed_dims) # 128
+
+        self.patch_mixer = nn.Sequential(
+            nn.Linear(num_patches, patch_mix_dims, bias=False), # try here
+            nn.GELU(),
+            nn.Dropout(drop_out),
+            nn.Linear(patch_mix_dims, num_patches, bias=False),
+            nn.Dropout(drop_out)
+        )
+
+        self.channel_mixer = nn.Sequential(
+            nn.Linear(embed_dims, channel_mix_dims),
+            nn.GELU(),
+            nn.Dropout(drop_out),
+            nn.Linear(channel_mix_dims, embed_dims),
+            nn.Dropout(drop_out)
+        )
+
+        self.norm1 = nn.LayerNorm(embed_dims)
+        self.norm2 = nn.LayerNorm(embed_dims)
+
+    def forward(self, x):
+        # x_mask = (x.sum(-1)!=0).to(x.dtype)
+        x = x + self.patch_mixer(self.norm1(x).transpose(1,2)).transpose(1,2)
+        x = x + self.channel_mixer(self.norm2(x))
+        # x *= x_mask
+        return x
+```
+
+
