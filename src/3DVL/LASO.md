@@ -720,7 +720,7 @@ def main(opt, dict):
             # 5. 计算损失
             loss_hm = criterion_hm(_3d, gt_mask)
             # loss_ce = criterion_ce(logits, cls)
-
+            # 6. 反向传播
             temp_loss = loss_hm # + opt.loss_cls*loss_ce
             temp_loss.backward()
             optimizer.step()
@@ -739,6 +739,7 @@ def main(opt, dict):
                 total_MAE = 0
                 total_point = 0
                 model = model.eval()
+                # 
                 for i,(point, _, label, question,aff_label) in enumerate(val_loader):
                     point, label = point.float(), label.float()
                    

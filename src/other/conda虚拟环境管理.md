@@ -144,6 +144,15 @@ pip install -r requirements.txt
 4. 可以使用 which pip 或 where pip (Windows) 确认你使用的是 Conda 环境中的 pip
 
 
+> pip install 安装失败的包，尝试使用conda install命令安装即可，再不行尝试源码编译安装(例如某些包在arm64系统上没有预先编译好的版本)。
+
+
+| 特性 | pip | conda |
+| --- | --- | --- |
+| 默认仓库 | PyPI（Python Package Index） | Anaconda 官方仓库 / conda-forge |
+| 包类型 | 仅 Python 包（纯 Python 或源码） | 预编译的二进制包（含非 Python 依赖） |
+| 非 Python 依赖 | 不管理（如 FFmpeg、HDF5） | 自动安装（如 CUDA、MKL） |
+
 ## 九、常见错误
 
 1. CondaError: Run 'conda init' before 'conda activate’
