@@ -675,6 +675,15 @@ _3daffordance = torch.sigmoid(_3daffordance)
 - 使用 sigmoid 得到最终的掩码，形状 `(B, N)`；
 - 每个点的值 ∈ [0, 1]，表示其属于目标功能区域的概率；
 
+## 损失函数
+
+### Focal Loss
+
+
+
+### Dice Loss
+
+
 ## 训练
 
 训练部分的核心代码实现如下:
@@ -814,6 +823,3 @@ def main(opt, dict):
     category_metrics, affordance_metrics, overall_metrics = evaluate(model, test_loader, device, 3)
     print_metrics_in_table(category_metrics, affordance_metrics, overall_metrics, logger)
 ```
-
-### 损失函数
-
