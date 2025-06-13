@@ -823,3 +823,6 @@ def main(opt, dict):
     category_metrics, affordance_metrics, overall_metrics = evaluate(model, test_loader, device, 3)
     print_metrics_in_table(category_metrics, affordance_metrics, overall_metrics, logger)
 ```
+
+## 部署
+
