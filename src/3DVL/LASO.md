@@ -677,12 +677,100 @@ _3daffordance = torch.sigmoid(_3daffordance)
 
 ## 损失函数
 
-### Focal Loss
+### HM_Loss（Hybrid Mask Loss）
+
+在 LASO 数据集中，模型需要根据自然语言问题识别点云中最相关的功能区域（如 grasping area, opening area 等），而 HM_Loss 是 PointRefer 模型的监督信号，它结合了： 
+
+- Focal Loss ：用于缓解类别不平衡问题；
+
+- Dice Loss ：用于衡量预测掩码与真实标签之间的空间重合度；
+
+最终 loss = CELoss + DiceLoss，让模型同时关注逐点分类精度和整体区域匹配。
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
+class HM_Loss(nn.Module):
+    def __init__(self):
+        """
+        Hybrid Mask Loss 实现：
+        - BCE-Focal Loss（加权交叉熵）
+        - Dice Loss（衡量预测掩码与 GT 的重合度）
 
-### Dice Loss
+        公式来自论文 Section 4.2，用于语言引导下的功能区域分割。
+        """
+        super(HM_Loss, self).__init__()
+        # 设置 Focal Loss 参数
+        self.gamma = 2      # 聚焦参数，放大难分类样本影响
+        self.alpha = 0.25   # 平衡因子，强调正类（前景点）loss
 
+    def forward(self, pred, target):
+        """
+        输入：
+            pred: 模型输出的原始 logit 或经过 sigmoid 的概率值；
+                  形状为 [B, N]
+            target: ground truth 掩码（soft mask），形状也为 [B, N]
+
+        返回：
+            total_loss: CELoss + DiceLoss 的加权和
+        """
+
+        # Step 1: 构建 Focal Loss 权重项
+        # temp1：负类 loss（背景点）
+        # temp2：正类 loss（目标功能区域）
+        # 1e-6 的加入是为了让 log 计算保持稳定，尤其是在预测值接近极端值（0 或 1）时
+        temp1 = -(1 - self.alpha) * torch.mul(
+            pred ** self.gamma,
+            torch.mul(1 - target, torch.log(1 - pred + 1e-6))
+        )
+        temp2 = -self.alpha * torch.mul(
+            (1 - pred) ** self.gamma,
+            torch.mul(target, torch.log(pred + 1e-6))
+        )
+
+        # 将两个方向的 loss 合并，并取 batch 和点维度的平均
+        temp = temp1 + temp2
+        CELoss = torch.sum(torch.mean(temp, dim=(0, 1)))
+
+        # Step 2: 计算正类 Dice Loss（预测与 Ground Truth 的交集 / 并集）
+        intersection_positive = torch.sum(pred * target, dim=1)
+        cardinality_positive = torch.sum(torch.abs(pred) + torch.abs(target), dim=1)
+        dice_positive = (intersection_positive + 1e-6) / (cardinality_positive + 1e-6)
+
+        # Step 3: 计算负类 Dice Loss（非目标区域匹配度）
+        intersection_negative = torch.sum((1 - pred) * (1 - target), dim=1)
+        cardinality_negative = torch.sum(2 - torch.abs(pred) - torch.abs(target), dim=1)
+        dice_negative = (intersection_negative + 1e-6) / (cardinality_negative + 1e-6)
+
+        # Step 4: 构建 Dice Loss，形式为 1 - Dice Score
+        # 使用了一个偏置项 1.5（可能是经验设定）
+        temp3 = torch.mean(1.5 - dice_positive - dice_negative, dim=0)
+        DICELoss = torch.sum(temp3)
+
+        # Step 5: 总损失 = 分类误差 + 区域匹配误差
+        return CELoss + 1.0 * DICELoss
+```
+
+在论文 Section 4.2 中提到：
+
+> “We solely employ Dice loss and Binary Cross-Entropy (BCE) loss to guide the segmentation mask prediction.” 
+
+虽然这里用的是 Focal Loss + Dice Loss 的组合形式，但它本质上是 BCE + Dice 的改进版，具有以下优势：
+
+- Focal Loss: 抑制 easy examples，放大 hard examples，防止忽略小区域
+
+- Dice Loss: 关注整体掩码匹配度，提升边界识别能力
+
+两者结合可以：
+
+- 缓解类别极度不平衡问题；
+
+- 提高模型对语言指令下功能区域的理解能力；
+
+- 更好地应对 LASO 中的语言引导 + soft mask 场景；
 
 ## 训练
 
