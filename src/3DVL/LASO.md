@@ -774,7 +774,7 @@ class HM_Loss(nn.Module):
 
 ## 训练
 
-训练部分的核心代码实现如下:
+模型的训练过程大体分为了 准备，训练，评估 三个流程；准备阶段主要完成数据集加载，模型初始化，损失函数定义，优化器设置，学习率调度器初始化等；
 
 ```python
 def main(opt, dict):
@@ -800,7 +800,10 @@ def main(opt, dict):
     optimizer = torch.optim.Adam(params = param_dicts, lr=dict['lr'], betas=(0.9, 0.999), eps=1e-8, weight_decay=opt.decay_rate)
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=dict['Epoch'], eta_min=1e-6)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
-    
+```
+训练阶段则是模型的核心迭代过程，包括前向传播，损失计算，反向传播，参数更新等:
+
+```python
     '''
     Training
     '''
@@ -824,92 +827,305 @@ def main(opt, dict):
         
         results = torch.zeros((len(val_dataset), 2048, 1))
         targets = torch.zeros((len(val_dataset), 2048, 1))
+```
 
-        '''
-        Evalization
-        '''
-        if((epoch+1)%1 == 0):
-            num = 0
-            with torch.no_grad():
-                num_batches = len(val_loader)
-                val_loss_sum = 0
-                total_MAE = 0
-                total_point = 0
-                model = model.eval()
-                # 
-                for i,(point, _, label, question,aff_label) in enumerate(val_loader):
-                    point, label = point.float(), label.float()
-                   
-                    _3d = model(question, point)
-                    mae, point_nums = evaluating(_3d, label)
-                    total_point += point_nums
-                    # val_loss_sum += val_loss.item()
-                    total_MAE += mae.item()
-                    pred_num = _3d.shape[0]
-                    # print(f'---val_loss | {val_loss.item()}')
-                    results[num : num+pred_num, :, :] = _3d.unsqueeze(-1)
-                    targets[num : num+pred_num, :, :] = label.unsqueeze(-1)
-                    num += pred_num
+评估阶段则是在验证集或测试集上评估模型的性能，计算指标包括 MAE，SIM，AUC，mIoU。
 
-                # val_mean_loss = val_loss_sum / num_batches
-                # logger.debug(f'Epoch_{epoch} | val_loss | {val_mean_loss}')
-                mean_mae = total_MAE / total_point
-                results = results.detach().numpy()
-                targets = targets.detach().numpy()
-                # print(f'cuda memorry:{torch.cuda.memory_allocated(opt.gpu)/ (1024*1024)}')
-                SIM_matrix = np.zeros(targets.shape[0])
-                for i in range(targets.shape[0]):
-                    SIM_matrix[i] = SIM(results[i], targets[i])
+在 **LASO（Language-guided Affordance Segmentation on 3D Object）任务** 中，作者使用了四个核心评估指标来衡量模型对语言引导下功能区域的识别能力：
 
-                sim = np.mean(SIM_matrix)
-                AUC = np.zeros((targets.shape[0], targets.shape[2]))
-                IOU = np.zeros((targets.shape[0], targets.shape[2]))
-                IOU_thres = np.linspace(0, 1, 20)
-                targets = targets >= 0.5
-                targets = targets.astype(int)
-                for i in range(AUC.shape[0]):
-                    t_true = targets[i]
-                    p_score = results[i]
+| 指标 | 名称 | 英文全称 |
+|------|------|------------|
+| MAE | 平均绝对误差 | Mean Absolute Error |
+| SIM | 相似性得分 | Similarity Score |
+| AUC | 曲线下面积 | Area Under the Curve |
+| mIoU | 平均交并比 | mean Intersection over Union |
 
-                    if np.sum(t_true) == 0:
-                        AUC[i] = np.nan
-                        IOU[i] = np.nan
-                    else:
-                        auc = roc_auc_score(t_true, p_score)
-                        AUC[i] = auc
+---
 
-                        p_mask = (p_score > 0.5).astype(int)
-                        temp_iou = []
-                        for thre in IOU_thres:
-                            p_mask = (p_score >= thre).astype(int)
-                            intersect = np.sum(p_mask & t_true)
-                            union = np.sum(p_mask | t_true)
-                            temp_iou.append(1.*intersect/union)
-                        temp_iou = np.array(temp_iou)
-                        aiou = np.mean(temp_iou)
-                        IOU[i] = aiou
+1. MAE（Mean Absolute Error）是预测值与真实值之间的平均绝对误差，用于衡量模型输出的 soft mask 与 ground truth 掩码之间的逐点偏差。
 
-                AUC = np.nanmean(AUC)
-                IOU = np.nanmean(IOU)
+$$
+\text{MAE} = \frac{1}{N} \sum_{i=1}^{N} |\hat{y}_i - y_i|
+$$
 
-                logger.debug(f'AUC:{AUC} | IOU:{IOU} | SIM:{sim} | MAE:{mean_mae}')
+其中：
 
-                current_IOU = IOU
-                if(current_IOU > best_IOU):
-                    best_IOU = current_IOU
-                    best_model_path = save_path + '/best_model-{}.pt'.format(sign)
-                    checkpoint = {
-                        'model': model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'Epoch': epoch
-                    }
-                    torch.save(checkpoint, best_model_path)
-                    logger.debug(f'best model saved at {best_model_path}')
-        scheduler.step()
-    logger.debug(f'Best Val IOU:{best_IOU}')
+- $N$：点云中点的数量；
 
-    category_metrics, affordance_metrics, overall_metrics = evaluate(model, test_loader, device, 3)
-    print_metrics_in_table(category_metrics, affordance_metrics, overall_metrics, logger)
+- $\hat{y}_i$：模型预测该点属于功能区域的概率；
+
+- $y_i$：ground truth 标签（可以是 soft mask 或 binary mask）；
+
+特点与作用：
+
+| 特性 | 描述 |
+|--------|--------|
+| ✔️ 支持 soft mask 输入 | 不依赖 thresholding，适用于连续响应值 |
+| ✔️ 衡量整体分布一致性 | 反映模型是否准确学习语言引导下的响应强度 |
+| ⚠️ 对边界模糊区域不敏感 | IoU 等指标更关注重合度 |
+
+---
+
+2. SIM（Similarity）是一种基于直方图交集的相似性指标，用于衡量两个概率分布之间的匹配程度。它常用于图像检索、图像分割等任务。
+
+$$
+\text{SIM} = \sum_i \min(\hat{y}_i, y_i)
+$$
+
+即：对每个点取预测值和真实值中的较小者，然后求和。也可以归一化为：
+
+$$
+\text{SIM} = \frac{\sum_i \min(\hat{y}_i, y_i)}{\sum_i y_i}
+$$
+
+特点与作用：
+
+| 特性 | 描述 |
+|--------|--------|
+| ✔️ 不需要 thresholding | 支持 soft mask 输入 |
+| ✔️ 强调分布匹配 | 不仅看交集，还看响应强度分布 |
+| ✔️ 对边界模糊区域友好 | 不像 IoU 那样依赖 hard threshold |
+| ⚠️ 不直接优化最终目标 | 不能作为 loss 使用，更适合评估 |
+
+---
+
+3. AUC（Area Under ROC Curve）是 Receiver Operating Characteristic (ROC) 曲线下的面积，衡量模型对二分类问题的判别能力。
+
+AUC 的计算流程如下：
+
+1. 将预测值排序；
+
+2. 对不同阈值计算 TPR 和 FPR；
+
+3. 绘制 ROC 曲线；
+
+4. 计算曲线下面积（AUC）；
+
+特点与作用：
+
+| 特性 | 描述 |
+|--------|--------|
+| ✔️ 不依赖特定阈值 | 考察所有可能的 threshold 下的表现 |
+| ✔️ 关注排序能力 | 判断模型是否能正确区分前景和背景 |
+| ✔️ 适用于 binary 分类 | 需要先将 soft mask 转换为 binary |
+| ⚠️ 对 small region 敏感度有限 | 需结合 mIoU 使用 |
+
+---
+
+4. mIoU（mean Intersection over Union）是图像/点云分割中最常用的指标之一，衡量预测区域与真实标签之间的空间重合度。
+
+### 🔢 公式如下：
+
+$$
+\text{IoU} = \frac{|X \cap Y|}{|X \cup Y|}
+= \frac{\sum (\hat{y}_i \cdot y_i)}{\sum (\hat{y}_i + y_i) - \sum (\hat{y}_i \cdot y_i)}
+$$
+
+其中：
+- $ X $：预测的 binary mask；
+- $ Y $：真实的 binary mask；
+
+通常我们会使用多个 threshold（如 `np.linspace(0, 1, 20)`），然后取平均得到 aiou（average IoU）。
+
+### 🧠 特点与作用：
+
+| 特性 | 描述 |
+|--------|--------|
+| ✔️ 直接评价分割精度 | 最贴近实际应用需求 |
+| ✔️ 对边界敏感 | 能反映边缘响应质量 |
+| ✔️ 易受 threshold 影响 | 多阈值评估更稳定 |
+| ⚠️ 不支持 soft mask 直接输入 | 需先 threshold 成 binary mask |
+
+### 🎯 在 LASO 中的应用：
+
+- 模型输出的是 soft mask，需先 threshold 成 binary；
+- 使用多 threshold 提高鲁棒性；
+- 论文中达到 20.8%，表明 PointRefer 在语言引导下具备较好的区域定位能力；
+
+---
+
+## 📊 四个指标对比总结
+
+| 指标 | 是否支持 soft mask | 是否依赖 threshold | 是否关注分布相似性 | 是否关注空间重合度 | 输出范围 |
+|--------|---------------------|-------------------|---------------------|-----------------------|------------|
+| **MAE** | ✅ 是 | ❌ 否 | ✅ 是 | ❌ 否 | [0, ∞) |
+| **SIM** | ✅ 是 | ❌ 否 | ✅ 是 | ❌ 否 | [0, 1] |
+| **AUC** | ✅ 是（排序） | ✅ 是（binary） | ❌ 否 | ❌ 否 | [0, 1] |
+| **mIoU** | ❌ 否（需先 threshold） | ✅ 是 | ❌ 否 | ✅ 是 | [0, 1] |
+
+---
+
+## 🎯 结合论文理解这些指标的意义
+
+来自论文 Table 3 的结果：
+
+| 方法 | mIoU | AUC | SIM | MAE |
+|------|-------|------|-------|------|
+| **PointRefer（完整方法）** | **20.8%** | **87.3%** | **0.629** | **0.093** |
+
+这些指标共同构成了 LASO 任务的评估体系，分别从以下角度衡量模型表现：
+
+| 角度 | 对应指标 |
+|--------|-------------|
+| 1. 分布一致性 | SIM |
+| 2. 分类判别能力 | AUC |
+| 3. 逐点误差 | MAE |
+| 4. 区域重合度 | mIoU |
+
+这意味着：
+- PointRefer 不仅理解语言指令；
+- 还能生成与 GT 掩码高度匹配的功能区域；
+- 并且在 unseen object 上也具有泛化能力；
+
+---
+
+## 🧪 实验建议：如何利用这些指标进行训练监控？
+
+你可以将这些指标封装进你的训练脚本中，并通过 TensorBoard 记录它们的变化趋势：
+
+```python
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter(log_dir=os.path.join(save_path, 'logs'))
+
+# 在验证阶段
+writer.add_scalar('val/AUC', AUC, epoch)
+writer.add_scalar('val/mIoU', IOU, epoch)
+writer.add_scalar('val/SIM', sim, epoch)
+writer.add_scalar('val/MAE', mean_mae, epoch)
+```
+
+这样可以在训练过程中实时观察哪些部分提升或下降，便于调试和改进。
+
+---
+
+## 📈 一句话总结
+
+> 在 LASO 这种类别不平衡、soft mask、语言引导的 3D 功能区域识别任务中，四个指标协同工作：
+>
+> - **MAE** 衡量逐点误差；
+> - **SIM** 衡量分布相似性；
+> - **AUC** 衡量分类器排序能力；
+> - **mIoU** 衡量空间重合度；
+>
+> 它们共同帮助我们判断模型是否真正理解语言引导下的功能区域语义。
+
+---
+
+如果你还想了解：
+- 如何可视化这些指标在点云上的分布；
+- 如何改进这些指标以适应动态场景；
+- 或者如何封装进 TensorBoard 日志记录；
+
+欢迎继续提问！我可以为你补充完整实现或实验分析 ✅
+
+
+```python
+'''
+Evalization
+'''       
+if ((epoch + 1) % 1 == 0):  # 每个 epoch 结束后都进行评估（可改为每几个 epoch）
+    num = 0
+    with torch.no_grad():  # 不计算梯度，节省内存和计算资源
+        logger.debug(f'EVALUATION start-------')
+        num_batches = len(val_loader)
+        total_MAE = 0.0
+        total_point = 0
+        model = model.eval()  # 设置为评估模式，关闭 dropout / batchnorm 的随机性
+
+        for i, (point, _, label, question, aff_label) in enumerate(val_loader):
+            print(f'iteration: {i}/{len(val_loader)} start----')
+            
+            # 将输入数据转为 float 并移动到 GPU 上（如果使用 GPU）
+            point, label = point.float(), label.float()
+            if opt.use_gpu:
+                point = point.to(device)
+                label = label.to(device)
+
+            # 前向传播，得到预测的 soft mask `_3d` ∈ [B, N]
+            _3d = model(question, point)
+
+            # 计算 MAE（Mean Absolute Error），衡量逐点误差
+            mae, point_nums = evaluating(_3d, label)
+            total_point += point_nums
+            total_MAE += mae.item()
+            pred_num = _3d.shape[0]  # 当前 batch 的样本数
+
+            # 收集所有样本的预测结果，便于后续统一评估
+            results[num : num + pred_num, :, :] = _3d.unsqueeze(-1)  # shape: [B, N, 1]
+            targets[num : num + pred_num, :, :] = label.unsqueeze(-1)  # shape: [B, N, 1]
+            num += pred_num  # 更新索引
+
+        # 计算平均 MAE（Mean Absolute Error）
+        mean_mae = total_MAE / total_point
+        results = results.detach().numpy()
+        targets = targets.detach().numpy()
+
+        # 计算 SIM（Similarity Metric）——直方图交集，衡量分布相似性
+        SIM_matrix = np.zeros(targets.shape[0])
+        for i in range(targets.shape[0]):
+            SIM_matrix[i] = SIM(results[i], targets[i])  # SIM 函数定义见 utils.eval
+        sim = np.mean(SIM_matrix)
+
+        # 初始化 AUC 和 IOU 存储数组
+        AUC = np.zeros((targets.shape[0], targets.shape[2]))  # shape: [num_samples, 1]
+        IOU = np.zeros((targets.shape[0], targets.shape[2]))
+        IOU_thres = np.linspace(0, 1, 20)  # 多阈值下的 IoU 计算
+
+        # 将 GT 标签二值化（soft mask → binary mask）
+        targets_binary = (targets >= 0.5).astype(int)
+
+        for i in range(AUC.shape[0]):
+            t_true = targets_binary[i].flatten()  # 真实标签
+            p_score = results[i].flatten()        # 模型输出的概率值
+
+            if np.sum(t_true) == 0:
+                # 如果当前样本没有正类（即无功能区域），标记为 nan
+                AUC[i] = np.nan
+                IOU[i] = np.nan
+            else:
+                # 计算 AUC（Area Under the Curve），衡量分类器整体判别能力
+                auc = roc_auc_score(t_true, p_score)
+                AUC[i] = auc
+
+                # 使用多个阈值计算 mIoU（mean Intersection over Union）
+                temp_iou = []
+                for thre in IOU_thres:
+                    p_mask = (p_score >= thre).astype(int)  # 用不同 threshold 生成 binary mask
+                    intersect = np.sum(p_mask & t_true)      # 交集
+                    union = np.sum(p_mask | t_true)         # 并集
+                    temp_iou.append(intersect / union)      # IoU = intersect / union
+                temp_iou = np.array(temp_iou)
+                aiou = np.mean(temp_iou)  # 对所有 threshold 下的 IoU 取均值
+                IOU[i] = aiou
+
+        # 最终取所有样本的 AUC 和 mIoU 均值作为最终评估指标
+        AUC = np.nanmean(AUC)
+        IOU = np.nanmean(IOU)
+
+        # 打印当前性能指标
+        logger.debug(f'AUC:{AUC} | IOU:{IOU} | SIM:{sim} | MAE:{mean_mae}')
+
+        current_IOU = IOU
+        # 如果当前 mIoU 超过历史最佳，则保存 best model
+        if current_IOU > best_IOU:
+            best_IOU = current_IOU
+            best_model_path = save_path + '/best_model-{}.pt'.format(sign)
+            checkpoint = {
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'Epoch': epoch
+            }
+            torch.save(checkpoint, best_model_path)
+            logger.debug(f'best model saved at {best_model_path}')
+    
+    # 学习率调度器 step
+    scheduler.step()
+# 记录最佳验证集 mIoU
+logger.debug(f'Best Val IOU:{best_IOU}')
+
+# 测试集最终评估
+category_metrics, affordance_metrics, overall_metrics = evaluate(model, test_loader, device, 3)
+print_metrics_in_table(category_metrics, affordance_metrics, overall_metrics, logger)
 ```
 
 ## 部署
