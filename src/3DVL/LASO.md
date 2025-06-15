@@ -1082,8 +1082,11 @@ print_metrics_in_table(category_metrics, affordance_metrics, overall_metrics, lo
 设置后台运行，同时将运行时输出写入日志:
 
 ```bash
-nohup python train.py > train.log 2>&1 &
+nohup python -u train.py > train.log 2>&1 &
 ```
+> - 在 Python 命令中， -u 是 unbuffered 的缩写。Python 存在缓存机制， sys.stdout （标准输出）是有缓存的，只有遇到换行符或者输出内容积累到一定大小时，才会将内容显示到屏幕上；而 sys.stderr （标准错误）是无缓存的，程序向 sys.stderr 输出一个字符，就会立即在屏幕上显示一个字符 1 2 3 。
+> 
+> - 当在 Python 命令后加上 -u 参数（例如 python -u xx.py ），会强制标准输出也像标准错误一样，不通过缓存直接将内容打印到屏幕上 1 2 3 。这在使用 nohup 后台运行 Python 脚本时非常有用，可以避免因为输出缓存导致日志卡在某一行不输出的问题。
 
 持续追踪日志最新输出:
 
