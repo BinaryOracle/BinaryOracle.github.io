@@ -6,7 +6,7 @@ category:
 tag:
   - 3D-VL
   - 3D Affordance
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-05-30
 cover: assets/cover/LASO.png
