@@ -1079,5 +1079,21 @@ print_metrics_in_table(category_metrics, affordance_metrics, overall_metrics, lo
 
 ## 复现
 
+设置后台运行，同时将运行时输出写入日志:
 
+```bash
+nohup python train.py > train.log 2>&1 &
+```
+
+持续追踪日志最新输出:
+
+```bash
+tail -f train.log
+```
+
+杀死训练进程:
+
+```bash
+pkill -f "python train.py"
+```
 
