@@ -774,7 +774,11 @@ class HM_Loss(nn.Module):
 
 ## 训练
 
-模型的训练过程大体分为了 准备，训练，评估 三个流程；准备阶段主要完成数据集加载，模型初始化，损失函数定义，优化器设置，学习率调度器初始化等；
+模型的训练过程大体分为了 准备，训练，评估 三个流程；
+
+### 准备
+
+准备阶段主要完成数据集加载，模型初始化，损失函数定义，优化器设置，学习率调度器初始化等；
 
 ```python
 def main(opt, dict):
@@ -801,6 +805,9 @@ def main(opt, dict):
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=dict['Epoch'], eta_min=1e-6)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 ```
+
+### 训练
+
 训练阶段则是模型的核心迭代过程，包括前向传播，损失计算，反向传播，参数更新等:
 
 ```python
@@ -828,6 +835,7 @@ def main(opt, dict):
         results = torch.zeros((len(val_dataset), 2048, 1))
         targets = torch.zeros((len(val_dataset), 2048, 1))
 ```
+### 评估
 
 评估阶段则是在验证集或测试集上评估模型的性能，计算指标包括 MAE，SIM，AUC，mIoU。
 
@@ -893,13 +901,11 @@ $$
 
 AUC 的计算流程如下：
 
-1. 将预测值排序；
+1. 对不同阈值计算 TPR 和 FPR；
 
-2. 对不同阈值计算 TPR 和 FPR；
+2. 绘制 ROC 曲线；
 
-3. 绘制 ROC 曲线；
-
-4. 计算曲线下面积（AUC）；
+3. 计算曲线下面积（AUC）；
 
 特点与作用：
 
@@ -914,7 +920,7 @@ AUC 的计算流程如下：
 
 4. mIoU（mean Intersection over Union）是图像/点云分割中最常用的指标之一，衡量预测区域与真实标签之间的空间重合度。
 
-### 🔢 公式如下：
+公式如下：
 
 $$
 \text{IoU} = \frac{|X \cap Y|}{|X \cup Y|}
@@ -922,12 +928,12 @@ $$
 $$
 
 其中：
-- $ X $：预测的 binary mask；
-- $ Y $：真实的 binary mask；
+- $X$：预测的 binary mask；
+- $Y$：真实的 binary mask；
 
 通常我们会使用多个 threshold（如 `np.linspace(0, 1, 20)`），然后取平均得到 aiou（average IoU）。
 
-### 🧠 特点与作用：
+特点与作用：
 
 | 特性 | 描述 |
 |--------|--------|
@@ -936,15 +942,9 @@ $$
 | ✔️ 易受 threshold 影响 | 多阈值评估更稳定 |
 | ⚠️ 不支持 soft mask 直接输入 | 需先 threshold 成 binary mask |
 
-### 🎯 在 LASO 中的应用：
-
-- 模型输出的是 soft mask，需先 threshold 成 binary；
-- 使用多 threshold 提高鲁棒性；
-- 论文中达到 20.8%，表明 PointRefer 在语言引导下具备较好的区域定位能力；
-
 ---
 
-## 📊 四个指标对比总结
+四个指标对比总结:
 
 | 指标 | 是否支持 soft mask | 是否依赖 threshold | 是否关注分布相似性 | 是否关注空间重合度 | 输出范围 |
 |--------|---------------------|-------------------|---------------------|-----------------------|------------|
@@ -955,9 +955,7 @@ $$
 
 ---
 
-## 🎯 结合论文理解这些指标的意义
-
-来自论文 Table 3 的结果：
+结合论文理解这些指标的意义，来自论文 Table 3 的结果：
 
 | 方法 | mIoU | AUC | SIM | MAE |
 |------|-------|------|-------|------|
@@ -974,49 +972,22 @@ $$
 
 这意味着：
 - PointRefer 不仅理解语言指令；
+
 - 还能生成与 GT 掩码高度匹配的功能区域；
+
 - 并且在 unseen object 上也具有泛化能力；
-
----
-
-## 🧪 实验建议：如何利用这些指标进行训练监控？
-
-你可以将这些指标封装进你的训练脚本中，并通过 TensorBoard 记录它们的变化趋势：
-
-```python
-from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(log_dir=os.path.join(save_path, 'logs'))
-
-# 在验证阶段
-writer.add_scalar('val/AUC', AUC, epoch)
-writer.add_scalar('val/mIoU', IOU, epoch)
-writer.add_scalar('val/SIM', sim, epoch)
-writer.add_scalar('val/MAE', mean_mae, epoch)
-```
-
-这样可以在训练过程中实时观察哪些部分提升或下降，便于调试和改进。
-
----
-
-## 📈 一句话总结
 
 > 在 LASO 这种类别不平衡、soft mask、语言引导的 3D 功能区域识别任务中，四个指标协同工作：
 >
 > - **MAE** 衡量逐点误差；
+> 
 > - **SIM** 衡量分布相似性；
+> 
 > - **AUC** 衡量分类器排序能力；
+> 
 > - **mIoU** 衡量空间重合度；
 >
 > 它们共同帮助我们判断模型是否真正理解语言引导下的功能区域语义。
-
----
-
-如果你还想了解：
-- 如何可视化这些指标在点云上的分布；
-- 如何改进这些指标以适应动态场景；
-- 或者如何封装进 TensorBoard 日志记录；
-
-欢迎继续提问！我可以为你补充完整实现或实验分析 ✅
 
 
 ```python
