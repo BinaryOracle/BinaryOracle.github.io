@@ -990,59 +990,40 @@ $$
 > 它们共同帮助我们判断模型是否真正理解语言引导下的功能区域语义。
 
 
-```python
-'''
-Evalization
-'''       
-if ((epoch + 1) % 1 == 0):  # 每个 epoch 结束后都进行评估（可改为每几个 epoch）
-    num = 0
-    with torch.no_grad():  # 不计算梯度，节省内存和计算资源
-        logger.debug(f'EVALUATION start-------')
-        num_batches = len(val_loader)
-        total_MAE = 0.0
-        total_point = 0
-        model = model.eval()  # 设置为评估模式，关闭 dropout / batchnorm 的随机性
+验证集上进行评估的核心代码实现如下:
 
+```python 
+        num = 0
         for i, (point, _, label, question, aff_label) in enumerate(val_loader):
-            print(f'iteration: {i}/{len(val_loader)} start----')
-            
-            # 将输入数据转为 float 并移动到 GPU 上（如果使用 GPU）
-            point, label = point.float(), label.float()
-            if opt.use_gpu:
-                point = point.to(device)
-                label = label.to(device)
-
-            # 前向传播，得到预测的 soft mask `_3d` ∈ [B, N]
+            # 1. 前向传播，得到预测的 soft mask `_3d` ∈ [B, N]
             _3d = model(question, point)
 
-            # 计算 MAE（Mean Absolute Error），衡量逐点误差
+            # 2. 计算 MAE（Mean Absolute Error），衡量逐点误差
             mae, point_nums = evaluating(_3d, label)
             total_point += point_nums
             total_MAE += mae.item()
             pred_num = _3d.shape[0]  # 当前 batch 的样本数
 
-            # 收集所有样本的预测结果，便于后续统一评估
+            # 3. 收集所有样本的预测结果，便于后续统一评估
             results[num : num + pred_num, :, :] = _3d.unsqueeze(-1)  # shape: [B, N, 1]
             targets[num : num + pred_num, :, :] = label.unsqueeze(-1)  # shape: [B, N, 1]
             num += pred_num  # 更新索引
 
-        # 计算平均 MAE（Mean Absolute Error）
+        # 4. 计算平均 MAE（Mean Absolute Error）
         mean_mae = total_MAE / total_point
-        results = results.detach().numpy()
-        targets = targets.detach().numpy()
 
-        # 计算 SIM（Similarity Metric）——直方图交集，衡量分布相似性
+        # 5. 计算 SIM（Similarity Metric）—— 直方图交集，衡量分布相似性
         SIM_matrix = np.zeros(targets.shape[0])
         for i in range(targets.shape[0]):
             SIM_matrix[i] = SIM(results[i], targets[i])  # SIM 函数定义见 utils.eval
         sim = np.mean(SIM_matrix)
 
-        # 初始化 AUC 和 IOU 存储数组
+        # 6. 初始化 AUC 和 IOU 存储数组
         AUC = np.zeros((targets.shape[0], targets.shape[2]))  # shape: [num_samples, 1]
         IOU = np.zeros((targets.shape[0], targets.shape[2]))
         IOU_thres = np.linspace(0, 1, 20)  # 多阈值下的 IoU 计算
 
-        # 将 GT 标签二值化（soft mask → binary mask）
+        # 7. 将 GT 标签二值化（soft mask → binary mask）
         targets_binary = (targets >= 0.5).astype(int)
 
         for i in range(AUC.shape[0]):
@@ -1050,15 +1031,15 @@ if ((epoch + 1) % 1 == 0):  # 每个 epoch 结束后都进行评估（可改为�
             p_score = results[i].flatten()        # 模型输出的概率值
 
             if np.sum(t_true) == 0:
-                # 如果当前样本没有正类（即无功能区域），标记为 nan
+                # 8. 如果当前样本没有正类（即无功能区域），标记为 nan
                 AUC[i] = np.nan
                 IOU[i] = np.nan
             else:
-                # 计算 AUC（Area Under the Curve），衡量分类器整体判别能力
+                # 9. 计算 AUC（Area Under the Curve），衡量分类器整体判别能力
                 auc = roc_auc_score(t_true, p_score)
                 AUC[i] = auc
 
-                # 使用多个阈值计算 mIoU（mean Intersection over Union）
+                # 10. 使用多个阈值计算 mIoU（mean Intersection over Union）
                 temp_iou = []
                 for thre in IOU_thres:
                     p_mask = (p_score >= thre).astype(int)  # 用不同 threshold 生成 binary mask
@@ -1069,15 +1050,15 @@ if ((epoch + 1) % 1 == 0):  # 每个 epoch 结束后都进行评估（可改为�
                 aiou = np.mean(temp_iou)  # 对所有 threshold 下的 IoU 取均值
                 IOU[i] = aiou
 
-        # 最终取所有样本的 AUC 和 mIoU 均值作为最终评估指标
+        # 10. 最终取所有样本的 AUC 和 mIoU 均值作为最终评估指标
         AUC = np.nanmean(AUC)
         IOU = np.nanmean(IOU)
 
-        # 打印当前性能指标
+        # 11. 打印当前性能指标
         logger.debug(f'AUC:{AUC} | IOU:{IOU} | SIM:{sim} | MAE:{mean_mae}')
 
         current_IOU = IOU
-        # 如果当前 mIoU 超过历史最佳，则保存 best model
+        # 12. 如果当前 mIoU 超过历史最佳，则保存 best model
         if current_IOU > best_IOU:
             best_IOU = current_IOU
             best_model_path = save_path + '/best_model-{}.pt'.format(sign)
@@ -1087,14 +1068,11 @@ if ((epoch + 1) % 1 == 0):  # 每个 epoch 结束后都进行评估（可改为�
                 'Epoch': epoch
             }
             torch.save(checkpoint, best_model_path)
-            logger.debug(f'best model saved at {best_model_path}')
-    
-    # 学习率调度器 step
-    scheduler.step()
-# 记录最佳验证集 mIoU
-logger.debug(f'Best Val IOU:{best_IOU}')
+```
 
-# 测试集最终评估
+测试集最终评估:
+
+```python
 category_metrics, affordance_metrics, overall_metrics = evaluate(model, test_loader, device, 3)
 print_metrics_in_table(category_metrics, affordance_metrics, overall_metrics, logger)
 ```
