@@ -1077,5 +1077,7 @@ category_metrics, affordance_metrics, overall_metrics = evaluate(model, test_loa
 print_metrics_in_table(category_metrics, affordance_metrics, overall_metrics, logger)
 ```
 
-## 部署
+## 复现
+
+
 
