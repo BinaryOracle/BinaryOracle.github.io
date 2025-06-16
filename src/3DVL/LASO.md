@@ -1099,4 +1099,8 @@ tail -f train.log
 ```bash
 pkill -f "python train.py"
 ```
+用训练好的模型权重，进行推理:
 
+```python
+
+```
