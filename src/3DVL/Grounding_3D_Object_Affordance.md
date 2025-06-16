@@ -23,6 +23,8 @@ author:
 > 论文: [https://arxiv.org/abs/2504.04744](https://arxiv.org/abs/2504.04744)
 > 代码: [https://github.com/cn-hezhu/LMAffordance3D](https://github.com/cn-hezhu/LMAffordance3D)
 
+由于论文数据集还未开源，加之原本在Github上开源的代码后续被下架，导致本论文复现流程暂时终止。
+
 ## 环境配置 (待完善)
 
 > 建议用Linux或者Windows系统进行测试，MacOS系统某些包的加载和依赖关系上存在问题，不方便进行处理。
