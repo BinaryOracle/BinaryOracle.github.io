@@ -1270,4 +1270,5 @@ if __name__ == '__main__':
 
 ![If I want to sit on this chair, which part of the chair should I sit on?](LASO/7.png)
 
-> 本文使用的是训练了9个epoch后的模型权重进行的推理演示，后续训练完50个epoch后，会进行推理能力结果更新
+> 本文使用的是训练了9个epoch后的模型权重进行的推理演示，后续训练完50个epoch后，会进行推理能力结果更新。
+
