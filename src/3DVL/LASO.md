@@ -1099,8 +1099,175 @@ tail -f train.log
 ```bash
 pkill -f "python train.py"
 ```
-用训练好的模型权重，进行推理:
+
+用训练好的模型权重，进行推理 (以下代码是我自己写的一个测试代码):
 
 ```python
+import os
+import pickle
+import torch
+import numpy as np
+import open3d as o3d
+from utils.util import read_yaml
+from model.PointRefer import get_PointRefer
 
+def pc_normalize(pc):
+    """
+    点云数据归一化处理
+    Args:
+        pc: 输入点云数据，形状为 [N, 3] 的 numpy 数组
+    Returns:
+        归一化后的点云数据
+    """
+    centroid = np.mean(pc, axis=0)  # 计算点云质心
+    pc = pc - centroid              # 中心化
+    m = np.max(np.sqrt(np.sum(pc**2, axis=1)))  # 计算最大半径
+    pc = pc / m                     # 归一化到单位球内
+    return pc
+
+def predict_affordance_mask(points, text, model_path):
+    """
+    预测点云的功能区域掩码
+    Args:
+        points: 输入点云数据 [N, 3]
+        text: 描述功能的文本提示
+        model_path: 预训练模型路径
+    Returns:
+        功能区域预测结果 [N]
+    """
+    # 加载模型配置
+    dict = read_yaml("config/default.yaml")
+    dict['bs'] = 16       # 设置batch size
+    dict['lr'] = 1e-4     # 设置学习率
+    dict['Epoch'] = 50    # 设置训练轮数
+    
+    # 初始化PointRefer模型
+    model = get_PointRefer(
+        emb_dim=dict['emb_dim'],
+        proj_dim=dict['proj_dim'], 
+        num_heads=dict['num_heads'], 
+        N_raw=dict['N_raw'],
+        num_affordance=dict['num_affordance'], 
+        n_groups=40
+    )
+    
+    # 加载预训练权重
+    checkpoint = torch.load(model_path, map_location='cpu')
+    model.load_state_dict(checkpoint['model'])
+    model.eval()  # 设置为评估模式
+
+    # 点云预处理
+    Point = pc_normalize(points)  # 归一化
+    Point = Point.transpose()     # 转置为 [3, N]
+    Points = torch.from_numpy(Point).unsqueeze(0).float()  # 增加batch维度 [1, 3, N]
+
+    text_list = [text]  # 文本输入格式处理
+    
+    # 模型推理
+    pred = model(text_list, Points)
+    pred = torch.squeeze(pred)  # 去除batch维度 [N]
+    affordance_pred = pred.cpu().detach().numpy()  # 转为numpy数组
+    return affordance_pred
+
+def visualize_affordance(points_coordinates, affordance_pred):
+    """
+    可视化功能区域预测结果（渐变颜色）
+    Args:
+        points_coordinates: 点云坐标 [N, 3]
+        affordance_pred: 预测结果 [N]
+    """
+    pred_point = o3d.geometry.PointCloud()
+    pred_point.points = o3d.utility.Vector3dVector(points_coordinates)
+
+    # 颜色映射：根据预测值从灰色(背景)到红色(功能区域)渐变
+    color = np.zeros((2048, 3))
+    reference_color = np.array([255, 0, 0])  # 红色
+    back_color = np.array([190, 190, 190])   # 灰色
+
+    for i, aff_pred in enumerate(affordance_pred):
+        scale_i = aff_pred
+        color[i] = (reference_color - back_color) * scale_i + back_color
+    
+    pred_point.colors = o3d.utility.Vector3dVector(color.astype(np.float64) / 255.0)
+    o3d.visualization.draw_geometries([pred_point], 
+                                     window_name='Predicted Affordance', 
+                                     width=600, 
+                                     height=600)
+
+def visualize_point_cloud(points, pred_mask=None):
+    """
+    基础点云可视化（二值化显示）
+    Args:
+        points: 点云数据 [N, 3] 或 [N, 4]
+        pred_mask: 可选，预测掩码 [N]
+    """
+    pcd = o3d.geometry.PointCloud()
+    
+    # 数据预处理
+    if points.shape[1] == 4:  # 如果包含强度值
+        coordinates = points[:, :3].astype(np.float64)
+        if pred_mask is None:
+            pred_mask = points[:, 3] > 0.5  # 使用第4列作为默认掩码
+    else:
+        coordinates = points.astype(np.float64)
+        if pred_mask is None:
+            pred_mask = np.zeros(len(points), dtype=bool)
+            
+    # 设置颜色：红色=功能区域，蓝色=背景
+    colors = np.zeros((len(points), 3))
+    colors[pred_mask] = [1, 0, 0]  # 红色
+    colors[~pred_mask] = [0, 0, 1] # 蓝色
+    
+    pcd.points = o3d.utility.Vector3dVector(coordinates)
+    pcd.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
+    
+    # 创建可视化窗口
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name='LASO Prediction Visualization')
+    vis.add_geometry(pcd)
+    
+    # 设置渲染参数
+    opt = vis.get_render_option()
+    opt.point_size = 2.5                   # 点大小
+    opt.background_color = np.array([1, 1, 1])  # 白色背景
+    
+    vis.run()  # 运行可视化
+    vis.destroy_window()
+
+if __name__ == '__main__':
+    # 数据路径设置
+    data_root = 'LASO_dataset'
+    
+    # 加载标注数据
+    with open(os.path.join(data_root, f'anno_val.pkl'), 'rb') as f:
+        anno = pickle.load(f)
+    
+    # 加载点云数据
+    with open(os.path.join(data_root, f'objects_val.pkl'), 'rb') as f:
+        objects = pickle.load(f)
+    
+    # 示例数据（第500个样本）
+    print("当前物体类型: ", anno[500]["class"])
+    print("当前物体待预测的功能区域: ", anno[500]["affordance"])
+    point_cloud_data = objects[anno[500]["shape_id"]]
+    # visualize_point_cloud(point_cloud_data) -- 可视化当前物体点云，再决定要使用什么文本查询
+
+    # 示例文本查询
+    text = "If I want to move this chair, which part of the chair should I hold with my hands?"
+    
+    # 执行预测和可视化
+    affordance_pred = predict_affordance_mask(
+        point_cloud_data, 
+        text, 
+        "runs/train/PointRefer/best_model-try_at_6.15_23.53.29.pt"
+    )
+    visualize_affordance(point_cloud_data, affordance_pred)
 ```
+
+预测结果可视化:
+
+![If I want to move this chair, which part of the chair should I hold with my hands?](LASO/6.png)
+
+![If I want to sit on this chair, which part of the chair should I sit on?](LASO/7.png)
+
+> 本文使用的是训练了9个epoch后的模型权重进行的推理演示，后续训练完50个epoch后，会进行推理能力结果更新
