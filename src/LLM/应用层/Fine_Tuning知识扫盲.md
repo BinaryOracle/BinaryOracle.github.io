@@ -158,3 +158,8 @@ QLoRA就是量化版的LoRA，它是在LoRA的基础上，进行了进一步的�
 
 
 PEFT 的微调方法，还有很多种，限于篇幅原因，不再这里一一介绍。感兴趣的朋友，可以阅读这篇论文：[Scaling Down to Scale Up: A Guide to Parameter-Efficient Fine-Tuning](https://arxiv.org/abs/2306.02511)。
+
+
+相关阅读资料:
+
+1. [Pre-train, Prompt, and Predict: A Systematic Survey of Prompting Methods in Natural Language Processing](https://arxiv.org/abs/2107.13586)
