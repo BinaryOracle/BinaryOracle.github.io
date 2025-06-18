@@ -162,4 +162,6 @@ PEFT 的微调方法，还有很多种，限于篇幅原因，不再这里一一
 
 相关阅读资料:
 
+0. [近代自然语言处理技术发展的“第四范式”](https://zhuanlan.zhihu.com/p/395115779)
+
 1. [Pre-train, Prompt, and Predict: A Systematic Survey of Prompting Methods in Natural Language Processing](https://arxiv.org/abs/2107.13586)
