@@ -17,14 +17,14 @@ export default defineUserConfig({
     slimsearchPlugin({
       indexContent: true
     }),
-    commentPlugin({
-      comment: true,
-      provider: "Giscus",
-      repo: "BinaryOracle/BlogComment",
-      repoId: "R_kgDOOtFoWQ",
-      category: "General",
-      categoryId: "DIC_kwDOOtFoWc4CqXdZ",
-    }),
+    // commentPlugin({
+    //   comment: true,
+    //   provider: "Giscus",
+    //   repo: "BinaryOracle/BlogComment",
+    //   repoId: "R_kgDOOtFoWQ",
+    //   category: "General",
+    //   categoryId: "DIC_kwDOOtFoWc4CqXdZ",
+    // }),
   ],
 
   // 和 PWA 一起启用

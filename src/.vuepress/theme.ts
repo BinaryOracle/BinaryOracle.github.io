@@ -112,6 +112,11 @@ export default hopeTheme({
       components: ["Badge", "VPCard"],
     },
 
+    comment: {
+      provider: "Waline",
+      serverURL: "https://waline-rosy-eta.vercel.app/", // your server url
+    },
+
     icon: {
       prefix: "fa6-solid:",
     },
