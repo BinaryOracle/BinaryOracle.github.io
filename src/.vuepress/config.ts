@@ -1,6 +1,6 @@
 import { defineUserConfig } from "vuepress";
 import { slimsearchPlugin } from '@vuepress/plugin-slimsearch';
-// import { commentPlugin } from '@vuepress/plugin-comment';
+import { commentPlugin } from '@vuepress/plugin-comment';
 
 import theme from "./theme.js";
 
@@ -25,6 +25,11 @@ export default defineUserConfig({
     //   category: "General",
     //   categoryId: "DIC_kwDOOtFoWc4CqXdZ",
     // }),
+    commentPlugin({
+      provider: 'Waline',
+      serverURL: 'https://waline-rosy-eta.vercel.app/',
+      // 其他选项...
+    }),
   ],
 
   // 和 PWA 一起启用
