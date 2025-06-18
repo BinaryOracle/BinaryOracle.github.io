@@ -1,6 +1,6 @@
 import { defineUserConfig } from "vuepress";
 import { slimsearchPlugin } from '@vuepress/plugin-slimsearch';
-import { commentPlugin } from '@vuepress/plugin-comment';
+// import { commentPlugin } from '@vuepress/plugin-comment';
 
 import theme from "./theme.js";
 
