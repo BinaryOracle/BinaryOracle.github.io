@@ -1,5 +1,5 @@
 ---
-title: LLaVA (Large Language and Vision Assistant)
+title: LLaVA 1.0(Large Language and Vision Assistant)
 icon: file
 category:
   - 多模态
@@ -13,7 +13,7 @@ author:
   - BinaryOracle
 ---
 
-`LLaVA: Large Language and Vision Assistant 论文简析` 
+`LLaVA 1.0 : Large Language and Vision Assistant 论文简析` 
 
 <!-- more -->
 
@@ -132,7 +132,7 @@ Assistant: [详细描述]
 
 3. 投影层 ：一个简单的线性层，连接视觉特征和语言嵌入空间
 
-![LLaVA模型结构](LLaVA/1.png)
+![LLaVA模型结构](LLaVA_1.0/1.png)
 
 训练流程:
 
