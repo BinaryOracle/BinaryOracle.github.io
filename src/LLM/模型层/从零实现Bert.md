@@ -17,7 +17,7 @@ author:
 
 <!-- more -->
 
-> TinyBert 源码链接:
+> TinyBert 源码链接: [https://github.com/BinaryOracle/TinyBert](https://github.com/BinaryOracle/TinyBert)
 
 ## Bert 是什么 ？
 
@@ -589,3 +589,43 @@ for epoch in range(epochs):
 
 - NSP Task: Correct / Total = 504 / 960 | Accuracy = 0.5250 (预测正确的句对数量/总句对数量)
 
+### Details
+
+本节将会对Bert模型实现的部分细节进行说明。
+
+#### Padding Mask 如何生成并起作用的 ？
+
+1. 首先模型会根据传入的Tokens列表生成一个Pad Mask矩阵，该 矩阵维度 和 Q@K.T 后得到的注意力得分矩阵维度相同
+
+```python
+def get_pad_mask(tokens, pad_idx=0):
+    '''
+    suppose index of [PAD] is zero in word2idx
+    tokens: [batch, seq_len]
+    '''
+    batch, seq_len = tokens.size()
+    pad_mask = tokens.data.eq(pad_idx).unsqueeze(1) # （batch,1,seq_len)
+    pad_mask = pad_mask.expand(batch, seq_len, seq_len) # （batch,seq_len,seq_len)
+    return pad_mask
+```
+假设输入的Token序列为: [A,B,C,PAD,PAD,PAD] , 则生成的Pad Mask模样为:
+
+![](从零实现Bert/15.png)
+
+在注意力得分矩阵计算完毕后，我们会使用Pad Mask矩阵将注意力得分矩阵中对应位置的得分设置为一个非常小的值，这样在后续的Softmax计算中，这些位置的概率就会接近0，从而在注意力机制中就不会考虑到这些PAD部分的Token了。
+
+```python
+class ScaledDotProductAttention(nn.Module):
+    def forward(self, Q, K, V, attn_mask):
+        scores = torch.matmul(Q, K.transpose(-1, -2) / msqrt(d_k))
+        # scores: [batch, n_heads, seq_len, seq_len]
+        scores.masked_fill_(attn_mask, -1e9)
+        attn = nn.Softmax(dim=-1)(scores)
+        # context: [batch, n_heads, seq_len, d_v]
+        context = torch.matmul(attn, V)
+        return context
+```
+
+![](从零实现Bert/16.png)
+
+> 横着看是计算某个词与全局序列中其他词的相关度，后续需要利用该相关度完成当前词的全局上下文信息融合，我们只需要确保对于某个词的上下文融合不被PAD词参与即可，而无需考虑PAD词的全局上下文信息是否需要进行计算。
