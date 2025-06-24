@@ -581,5 +581,11 @@ for epoch in range(epochs):
 > - 对于每一个输出位置 (i,j)，如果 dim=0（列方向），那么它从 input [i][index[i][j]] 中取值。
 
 
+### 效果
 
+本文所展示的Bert预训练属于教学级别的，最终的训练效果也是一般，仅供参考和学习:
+
+- MLM Task: Correct / Total = 3167 / 9027 | Accuracy = 0.3508 (预测正确的掩码词数量/总掩码的词数量)
+
+- NSP Task: Correct / Total = 504 / 960 | Accuracy = 0.5250 (预测正确的句对数量/总句对数量)
 
