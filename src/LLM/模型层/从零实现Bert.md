@@ -515,7 +515,8 @@ epochs = 100
 # 优化器与学习率调度器
 optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
 # 损失函数 + 标签平滑
-criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+criterion1 = nn.CrossEntropyLoss(label_smoothing=0.1)
+criterion2 = nn.CrossEntropyLoss(label_smoothing=0.1,ignore_index=0)
 
 # 加载检查点
 checkpoint_path = 'best_model.pth'
@@ -536,9 +537,9 @@ for epoch in range(epochs):
         logits_cls, logits_lm = model(input_ids, segment_ids, masked_pos)
 
         # NSP 任务损失
-        loss_cls = criterion(logits_cls, is_next)
+        loss_cls = criterion1(logits_cls, is_next)
         # MLM 任务损失
-        loss_lm = criterion(logits_lm.view(-1, tokenizer.vocab_size), masked_tokens.view(-1))
+        loss_lm = criterion2(logits_lm.view(-1, tokenizer.vocab_size), masked_tokens.view(-1))
         loss_lm = (loss_lm.float()).mean()
         # 总损失
         loss = loss_cls + loss_lm
@@ -566,7 +567,13 @@ for epoch in range(epochs):
 
 对于MLM任务损失计算来说，我们只会计算被随机遮盖或替换的部分，其余部分不做损失，因此模型返回的logits_lm也只包含被掩码的Token对应的模型预测真实词，同时通过`masked_tokens`可知这些被掩码Token对应的真实词作为Label，从而计算交叉熵损失就很简单了。
 
+这里需要注意一点，对于MLM任务损失计算来说，我们需要在其对应的CrossEntropyLoss中指定`ignore_index=0`，即忽略掉PAD部分的损失计算；
 
+> 这里PAD部分指的是对于不同的句子，它们都是按照其序列长度的20%比例进行的掩码，而对于较短的句子，其掩码数量可能会偏少，因此为了确保`masked_tokens`列表中所有句子掩码数量一致，需要对掩码数量不足`max_pred`的进行PAD填充。
 
+![](从零实现Bert/14.png)
 
+模型返回的`logits_lm`中同样含有PAD部分，但是我们在计算损失时指定了`ignore_index=0`，即忽略掉PAD部分的损失计算，因此不会影响最终的损失值计算。
+
+> gather函数比较灵活，它可以对Batch中每个句子都按照
 
