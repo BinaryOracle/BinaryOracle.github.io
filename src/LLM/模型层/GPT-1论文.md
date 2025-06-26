@@ -5,7 +5,7 @@ category:
   - NLP
 tag:
   - 预训练语言模型
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-06-20
 order: 2
@@ -17,7 +17,7 @@ author:
  
 <!-- more -->
 
-> 论文: [https://cdn.openai.com/research-covers/language-unsupervised/language_understanding_paper.pdf](https://cdn.openai.com/research-covers/language-unsupervised/language_understanding_paper.pdf)
+> 论文: [Improving Language Understanding by Generative Pre-Training](https://cdn.openai.com/research-covers/language-unsupervised/language_understanding_paper.pdf)
 
 ## 摘要
 
