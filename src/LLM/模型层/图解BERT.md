@@ -4,7 +4,7 @@ category:
   - NLP
 tag:
   - 预训练语言模型
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-05-19
 cover: assets/cover/BERT.jpg
