@@ -8,7 +8,6 @@ tag:
   - 已发布
 footer: 技术共建，知识共享
 date: 2025-06-15
-cover: assets/cover/InternVL.png
 author:
   - BinaryOracle
 ---
