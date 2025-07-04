@@ -228,3 +228,84 @@ InternVL的整体架构（如图3所示）突破了传统视觉模型（如ViT�
     * 一种是**单独使用 InternViT-6B**，如图 4(c) 所示；
     
     * 另一种是**同时使用完整的 InternVL 模型**，如图 4(d) 所示。
+
+## 实验
+
+### **视觉感知能力验证（Visual Perception Benchmarks）**
+
+图像分类（Image Classification）：
+
+- InternViT-6B 在 ImageNet-1K 及其多个变种（如 IN-A、IN-R、IN-V2 等）上进行线性探测评估。结果显示，其在冻结骨干网络的前提下，取得了领先的零样本分类准确率，**平均精度达到 82.5%**，超过了如 OpenCLIP-G、EVA-01-CLIP-g 等主流模型。
+
+![](InternVL-1.0/10.png)
+
+语义分割（Semantic Segmentation）：
+
+- 在 ADE20K 上进行语义分割测试，在不同微调策略下（线性探测、Head Tuning、全量微调），InternViT-6B 都展现出更强的像素级感知能力。例如，在全参数微调下，**mIoU 达到 58.9%**，显著优于 ViT-22B（55.3%）。
+
+![](InternVL-1.0/11.png)
+
+### **视觉-语言任务能力（Vision-Language Benchmarks）**
+
+零样本图像分类（Zero-Shot Image Classification）：
+
+- 在多语言版本的 ImageNet 上（EN, ZH, JP, AR, IT），InternVL-C 的表现优于 OpenCLIP-XLM-R 和其他多语言模型，展示了良好的语言泛化能力。
+
+![](InternVL-1.0/12.png)
+
+零样本图像-文本检索（Image-Text Retrieval）：
+
+- InternVL-C 和 InternVL-G 在英中双语的 Flickr30K / COCO / Flickr30K-CN / COCO-CN 上均取得 SoTA 表现，**InternVL-G 的 Recall\@1 在 COCO 图像→文本检索任务中达到 85.0%**，在多语言图像→文本检索任务 XTD 中，Recall\@10 平均可达 **96.6%**，显著超越现有方法。
+
+![](InternVL-1.0/13.png)
+
+![](InternVL-1.0/14.png)
+
+零样本图像字幕生成（Image Captioning）：
+
+- InternVL-G 在不使用指令微调的前提下，仅通过 QLLaMA 即可生成高质量图像描述。例如在 COCO 测试集上，**zero-shot CIDEr 得分达到 128.2**，超越如 BLIP-2、Qwen-VL 等多模态生成模型。
+
+![](InternVL-1.0/15.png)
+
+### **多模态对话任务（Multi-Modal Dialogue Benchmarks）**
+
+InternVL-Chat 在多模态对话基准（如 MME、POPE）上超越了多个 SoTA 模型。比如，在 MME 综合指标上，**InternVL-Chat（13B + QLLaMA）达到 1586.4 分**，优于 LLaVA-1.5 和 InstructBLIP 等方法。
+
+![](InternVL-1.0/16.png)
+
+此外，InternVL 的多模态对话能力还体现在：
+
+* VQA 子任务上：GQA 得分达 59.5（优于 LLaVA-13B 的 63.3）；
+
+* 图像字幕、OCR、视觉推理任务中均表现稳定，兼具理解和生成能力。
+
+
+### **消融实验（Ablation Study）**
+
+视觉主干设计选择（InternViT-6B）：
+
+- 作者在不同模型深度、宽度、MLP 比例等超参数组合上进行对比试验，最终选择了参数约为 5.9B 的 **variant 3** 作为 InternViT-6B 版本，在计算成本和准确率之间取得了良好平衡。
+
+![](InternVL-1.0/17.png)
+
+QLLaMA 的重要性验证：
+
+- 通过最小化配置（仅训练 MLP 层）进行对比，发现**使用 QLLaMA 作为 glue 层明显优于传统 MLP 层或 QFormer**，在对话任务（如 MME、OKVQA、GQA）上均有显著提升。例如 MME 得分从 1022.3（无 QLLaMA）提高至 1317.2（使用 QLLaMA 和 Vicuna-13B）。
+
+![](InternVL-1.0/18.png)
+
+### 总结
+
+InternVL 的实验结果充分证明了其设计策略的有效性：
+
+1. **大型视觉编码器（InternViT-6B）具备极强的感知能力**；
+
+2. **QLLaMA 显著提升了视觉-语言对齐与生成能力**；
+
+3. **多阶段训练策略（对比 + 生成 + 指令微调）保障了模型的通用性与灵活性**；
+
+4. **在图像分类、文本检索、VQA、多模态对话等任务上全面领先于现有开源模型**，是当前最具代表性的通用多模态基础模型之一。
+
+## 结论
+
+通过将视觉基础模型扩展到 60 亿参数规模（InternViT-6B），并与一个由 LLaMA 初始化的语言中间件（QLLaMA）进行渐进式对齐，InternVL 构建了一个强大且通用的视觉-语言基础模型。借助海量图文数据和多阶段训练策略（对比、生成、微调），InternVL 实现了在图像分类、图文检索、图像描述、VQA、多模态对话等任务上的领先性能，成功弥合了视觉模型与大型语言模型之间的能力与表示鸿沟，推动了多模态大模型的发展。
