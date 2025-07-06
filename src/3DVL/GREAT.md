@@ -1,5 +1,5 @@
 ---
-title: GREAT 模型代码解读
+title: GREAT 论文解读 
 icon: file
 category:
   - 3D-VL
@@ -15,7 +15,7 @@ author:
   - BinaryOracle
 ---
 
-`GREAT: Geometry-Intention Collaborative Inference for Open-Vocabulary 3D Object Affordance Grounding 论文代码解读` 
+`GREAT: Geometry-Intention Collaborative Inference for Open-Vocabulary 3D Object Affordance Grounding 论文解读` 
 
 <!-- more -->
 
