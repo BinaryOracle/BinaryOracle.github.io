@@ -42,6 +42,11 @@ torch.stack(tensors, dim=0, *, out=None)
 
 - 如果你想把一个 batch 中的多个样本打包成一个大 tensor，通常会用 torch.stack()。
 
+### permute
+
+
+
+
 ## 模型
 
 ### ResNet18
