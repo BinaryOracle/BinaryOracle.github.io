@@ -42,9 +42,53 @@ torch.stack(tensors, dim=0, *, out=None)
 
 - 如果你想把一个 batch 中的多个样本打包成一个大 tensor，通常会用 torch.stack()。
 
+### transpose
+
+```python
+y = x.transpose(dim0, dim1)
+```
+
+只交换`两个指定维度`，常用于 2D 或 3D 张量，如图像转置、RNN 输入调整等。
+
 ### permute
 
+```python
+y = x.permute(dims)
+```
+可以任意重新排列所有维度，是 transpose 的泛化，支持多维度同时交换。
 
+> transpose() 和 permute() 返回的张量虽然是视图（view），但它们的 内存布局（strides）被改变。如果你接下来要对它们执行 .view() 或某些要求内存连续的操作，就必须先调用 .contiguous()。
+
+![](API/4.png)
+ 
+执行 transpose(0, 2) 后:
+
+![](API/5.png)
+
+### view
+
+view: 在不复制数据的前提下，返回具有新形状（shape）的张量视图（view）。
+
+```python
+new_tensor = x.view(shape)
+```
+.view() 只适用于连续内存的张量，某些操作（如 permute, transpose）会改变张量的 stride（内存步长），使其变得 非连续。此时必须先 .contiguous() 再 .view()：
+
+```python
+x = torch.randn(2, 3, 4)
+y = x.permute(0, 2, 1)          # 改变维度顺序
+z = y.contiguous().view(2, -1)  # 否则可能报错
+```
+> .view() 不会复制数据，是原张量的一个视图（共享内存）
+
+### reshape
+
+reshape: 返回具有新形状的张量。必要时会复制数据，否则返回视图。 相比 .view()，reshape() 不要求原始张量是连续的，这是它最大的优势。
+
+```python
+new_tensor = x.reshape(shape)
+```
+在 PyTorch 中，`reshape()` 在多数情况下会返回原张量的视图（不复制数据），但**当张量的内存布局不连续**（例如经过了 `permute()`、`transpose()` 等操作），或新形状无法与原内存布局兼容时，`reshape()` 就会进行数据复制以创建新的张量。此外，如果张量来源于 `expand()`（广播视图），或者跨设备/特殊操作后的中间结果，也可能触发复制。因此，若希望确保内存效率，建议在 reshape 前使用 `.is_contiguous()` 检查，必要时用 `.contiguous()` 转为连续张量。
 
 
 ## 模型
