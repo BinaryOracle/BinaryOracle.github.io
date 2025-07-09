@@ -155,9 +155,309 @@ $$\bar{\mathbf{T}}_o = f_\delta(f_m(\mathbf{T}_o, \mathbf{T}_a)), \quad \bar{\ma
 **4. 解码与输出**  
 
 融合特征 $\mathbf{F}_\alpha = f[\Gamma(\mathbf{F}_{ti}), \mathbf{F}_{tp}]$ 通过解码器生成功能热图 $\phi = \sigma(f_\phi(\mathbf{F}_\alpha))$，其中 $\sigma$ 为 Sigmoid 函数。  
-
+ 
 **关键设计**（如图5所示）：  
 
 - **几何-意图协同**：MHACoT 同时建模物体属性和交互意图，提升开放词汇泛化性；  
 
-- **动态融合**：CMAFM 自适应对齐点云与图像模态，避免特征偏差（如表3消融实验所示）。
+- **动态融合**：CMAFM 自适应对齐点云与图像模态，避免特征偏差(如表3消融实验所示)
+
+## 代码
+
+### Multi-Head Affordance Chain-of-Thought
+
+MHACoT是一种**类人推理方式**，分多个步骤，模拟人观察交互图像时的思维链条：
+
+1. **识别交互部位**（Object Interaction Perception）
+
+2. **解析几何属性**（Geometric Structure Reasoning）
+
+3. **详细描述交互**（Interaction Detailed Description）
+
+4. **类比额外交互**（Interactive Analogical Reasoning）
+
+每个子步骤都由一个 prompt 引导 MLLM（如 InternVL）做回答，从而获得：
+
+* 对象的交互区域
+
+
+> **Object Interaction Perception**
+> Prompt 1: Point out which part of the object in the image interacts with the person.
+
+🔹目标：定位交互发生的对象区域（如“水壶的壶嘴”）
+
+---
+* 对应的几何属性
+
+> **Geometric Structure Reasoning**
+> Prompt 2: Explain why this part can interact from the geometric structure of the object.
+
+🔹目标：推理几何形态支持该交互（如“壶嘴上开口狭窄、带曲线”）
+
+---
+* 当前交互行为
+
+> **Interaction Detailed Description**
+> Prompt 3: Describe the interaction between object and the person.
+
+🔹目标：细致地识别交互动作及其参与部位（如“用手握住壶把倒水”）
+
+---
+* 潜在交互意图
+
+> **Interactive Analogical Reasoning**
+> Prompt 4: List two interactions that describe additional common interactions that the object can interact with people.
+
+🔹目标：推理除了当前交互以外，该物体常见的其他交互（如“开壶盖、抓握中部”）
+
+
+核心代码实现如下:
+
+```python
+# 1. 加载预训练多模态大模型
+model = AutoModel.from_pretrained(
+    path,
+    torch_dtype=torch.bfloat16,
+    #load_in_8bit=True,
+    low_cpu_mem_usage=True,
+    trust_remote_code=True,
+    device_map=device_map).eval()
+tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True, use_fast=False)
+
+# 2. 加载图像数据
+image_path = 'PATH/Data/Kettle/Internet/pour/kettle_pour_1.jpg'
+pixel_values = load_image(image_path, max_num=12).to(torch.bfloat16).cuda()
+object = image_path.split('/')[-4] # 图像所属的物体名
+
+# 3. 定位交互部位
+question1 = f'Point out which part of the {object} in the image interacts with the person. If this part is different from the part of the {object} shown in the image that performs the main function, point out the part of the {object} that performs the main function shown in the image.'
+response1, history = model.chat(tokenizer, pixel_values, question1, generation_config, history=None, return_history=True)
+print(f'{response1}')
+
+# 4. 推理几何结构
+question2 = f'Explain why this part can interact from the geometric structure of the {object}. Just give the final result in one sentence.'
+response2, history = model.chat(tokenizer, pixel_values, question2, generation_config, history=history, return_history=True)
+print(f'{response2}')
+
+# 5. 详细交互行为
+question3 = f'Describe the interaction between {object} and the person in the image, including the interaction type, the interaction part of the {object}, and the interaction part of the person.'
+response3, history= model.chat(tokenizer, pixel_values, question3, generation_config, history=history, return_history=True)
+print(f'{response3}')
+
+# 6. 推测其他交互
+question4 = f'List two interactions that describe additional common interactions that the {object} can interact with people, including the interaction type, the interaction part of the {object}, and the interaction part of the person.'
+response4, history= model.chat(tokenizer, pixel_values, question4, generation_config, history=history, return_history=True)
+print(f'{response4}')
+
+'''
+Sample output
+1. the spout of kettle.
+2. a narrow opening, a slight curve and the spout's position at the top of the kettle.
+3. pour the liquid from the spout of the kettle using people’s hand
+4. grasp the kettle using person's hand around middle body, open the kettle using people's fingers on the lid
+
+object knowledge: the spout of kettle: a narrow opening, a slight curve and the spout's position at the top of the kettle.
+affordance/human knowledge: pour the liquid from the spout of the kettle using people’s hand, grasp the kettle using person's hand around handle, open the kettle using people's fingers on the lid
+''
+```
+其中:
+
+- 几何结构知识 = Prompt 1 + Prompt 2 的回答 = 交互部位 + 该部位的几何属性推理
+
+- 交互知识 = Prompt 3 + Prompt 4 的回答 = 当前交互 + 类比/补充的交互方式 
+
+> MHACoT 这个过程发生在数据集准备阶段。
+
+### 数据集
+
+> 先了解一下GREAT项目对应的数据集目录结构:
+>
+> ![](GREAT/7.png)
+
+数据集的初始化:
+
+```python
+class PIAD(Dataset):
+    def __init__(self, run_type, setting_type, point_path, img_path, text_hk_path, text_ok_path, pair=2, img_size=(224, 224)):
+        super().__init__()
+
+        self.run_type = run_type # 当前是训练/测试/验证环境
+        self.p_path = point_path # 点云索引文件路径
+        self.i_path = img_path  # 图片索引文件路径
+        self.text_hk_path = text_hk_path # 物体几何结构文本数据文件路径
+        self.text_ok_path = text_ok_path # 人类交互文本数据文件路径
+        self.pair_num = pair  # 控制每个 图像样本 对应多少个 3D点云样本
+        self.affordance_label_list = ['grasp', 'contain', 'lift', 'open', 
+                        'lay', 'sit', 'support', 'wrapgrasp', 'pour', 'move', 'display',
+                        'push', 'listen', 'wear', 'press', 'cut', 'stab', 'carry', 'ride',
+                        'clean', 'play', 'beat', 'speak', 'pull']  # 24
+        
+        ...
+
+        '''
+        Seen
+        '''  # 43
+
+        if setting_type == 'Seen':
+            number_dict = {'Bag': 0, 'Microphone': 0, 'Toothbrush': 0, 'TrashCan': 0, 'Bicycle': 0,
+                           'Guitar': 0, 'Glasses': 0, 'Hat': 0, 'Microwave':0, 'Backpack': 0, 'Door':0, 'Scissors': 0, 'Bowl': 0,
+                           'Baseballbat': 0, 'Mop': 0, 'Dishwasher': 0, 'Bed': 0, 'Keyboard': 0, 'Clock': 0, 'Vase': 0, 'Knife': 0,
+                           'Suitcase': 0, 'Hammer': 0, 'Refrigerator': 0, 'Chair': 0, 'Umbrella': 0, 'Bucket': 0,
+                           'Display': 0, 'Earphone': 0, 'Motorcycle': 0, 'StorageFurniture': 0, 'Fork': 0, 'Broom': 0, 'Skateboard': 0,
+                           'Tennisracket': 0, 'Laptop': 0, 'Table':0, 'Bottle': 0, 'Faucet': 0, 'Kettle': 0, 'Surfboard': 0, 'Mug': 0,
+                            'Spoon': 0 
+                           }  
+        
+        # 读取所有图片路径，所有人类交互文本数据，所有物体几何结构文本数据
+        self.img_files = self.read_file(self.i_path)
+        self.text_human_files = self.read_file(self.text_hk_path)
+        self.text_object_files = self.read_file(self.text_ok_path)
+        self.img_size = img_size
+
+        if self.run_type == 'train':
+            # 读取所有点云路径，同时记录每类物体对应的样本总量，比如: 椅子对应的点云一共1000个
+            self.point_files, self.number_dict = self.read_file(self.p_path, number_dict)
+            self.object_list = list(number_dict.keys()) # 注意: Dict 按照key的插入顺序返回的
+            self.object_train_split = {}
+            start_index = 0
+            # 记录每个物体对应的点云索引下标区间
+            for obj_ in self.object_list:
+                temp_split = [start_index, start_index + self.number_dict[obj_]]
+                self.object_train_split[obj_] = temp_split
+                start_index += self.number_dict[obj_]
+        else:
+            self.point_files = self.read_file(self.p_path)
+```
+**为什么我们需要pair_num参数?**
+
+- 问题背景：GREAT 需要将 2D 交互图像（Image）与 3D 点云（Point Cloud）的特征进行对齐，但同一物体的不同实例可能有几何差异（例如不同形状的椅子）。
+
+- 解决方案：通过为每张图像配对多个点云（pair_num > 1），模型能够学习从 多样化的几何变体 中提取共性的几何属性（如“可抓握”的共享结构特征），而不仅仅依赖单一实例。
+
+- 代码体现：在 __getitem__ 中，训练时会对每个图像随机采样 pair_num 个同类别点云（见 point_sample_idx 的生成逻辑）
+
+> GREAT 项目的数据组织中，将每个样本属于的物体类型，待预测功能区域类型全部隐含在了样本对应的文件路径中:
+>
+> ![](GREAT/6.png)
+
+获取数据:
+
+```python
+    def __getitem__(self, index):
+        # 1. 获取图片，人类交互文本，物体几何结构文本
+        img_path = self.img_files[index]
+        text_hd = self.text_human_files[index]
+        text_od = self.text_object_files[index]
+       
+        # 2.1 评估时需要标准的单一样本对比
+        if (self.run_type=='val'):
+            point_path = self.point_files[index]
+        else:
+        # 2.2 从图片路径中截取得到物体名，交互行为名，点云索引下标区间  
+            object_name = img_path.split('/')[-4]
+            affordance_name = img_path.split('/')[-2]
+            range_ = self.object_train_split[object_name]
+            # 从索引区间中随机采样pair_num个点云样本
+            point_sample_idx = random.sample(range(range_[0],range_[1]), self.pair_num)
+      
+            # 3. 加载点云样本，同时判断是否与当前图片交互行为一致，不一致则重新随机选
+            for i ,idx in enumerate(point_sample_idx):
+                while True:
+                    point_path = self.point_files[idx]
+                    sele_affordance = point_path.split('/')[-2]
+                    if sele_affordance == affordance_name:
+                        point_sample_idx[i] = idx 
+                        break
+                    else:
+                        idx = random.randint(range_[0],range_[1]-1)  # re-select idx
+         
+        Img = Image.open(img_path).convert('RGB')
+        
+        if(self.run_type == 'train'):
+            Img = Img.resize(self.img_size)
+            Img = img_normalize_train(Img)
+            
+            # 4. 加载列表中所有点云样本
+            Points_List = []
+            affordance_label_List = []
+            affordance_index_List = []
+            for id_x in point_sample_idx:
+                point_path = self.point_files[id_x]
+                # 加载点云数据和功能区域掩码(功能区域热力图)
+                Points, affordance_label = self.extract_point_file(point_path) # （2048，3）
+                Points,_,_ = pc_normalize(Points)
+                Points = Points.transpose() # (3,2048)
+                affordance_index = self.get_affordance_label(img_path) # 当前点云待预测的交互行为/功能区域类型
+                Points_List.append(Points)  # 点云
+                affordance_label_List.append(affordance_label) # 功能区域热力图
+                affordance_index_List.append(affordance_index) # 待预测功能区域类型
+
+        else:
+            Img = Img.resize(self.img_size)
+            Img = img_normalize_train(Img)
+
+            Point, affordance_label = self.extract_point_file(point_path)
+            Point,_,_ = pc_normalize(Point)
+            Point = Point.transpose()
+ 
+        if(self.run_type == 'train'):
+            # 图片 ， 交互信息文本，物体几何结构文本，点云样本列表，功能区域热力图列表，待预测功能区域类型列表
+            return Img, text_hd, text_od, Points_List, affordance_label_List, affordance_index_List
+        else:
+            return Img, text_hd, text_od, Point, affordance_label, img_path, point_path
+```
+### 模型
+
+```python
+class GREAT(nn.Module):
+    ... 
+    def forward(self, img, xyz, text_human, text_object):
+
+        '''
+        img: [B, 3, H, W]
+        xyz: [B, 3, 2048]
+        '''
+       
+        B, C, N = xyz.size()
+        # 1. 用Resnet18对图像进行编码，返回的高维隐向量维度为 (batch,512,7,7) -- （batch,channel,h,w)
+        F_I = self.img_encoder(img)     
+        #   维度展平(batch,channel,h*w)
+        F_i = F_I.view(B, self.emb_dim, -1)         
+        
+        # 2， PointNet++ 对点云进行编码
+        F_p_wise = self.point_encoder(xyz)
+        # 3. Roberta 对交互文本和几何结构文本进行编码
+        T_h= self.text_encoder(text_human)
+        T_o = self.text_encoder2(text_object)
+        
+        # 4. 交互文本和几何结构文本的信息通过改良的交叉注意力机制进行交互融合
+        T_h_, T_o_ =self.affordance_dictionary_fusion(T_h, T_o)     
+
+        # 5. 交互文本信息与图像信息进行融合
+        I_h = self.img_text_fusion(F_i,T_h_)         
+        
+        # 6. 几何结构文本信息与点云信息进行融合，然后进入pointnet++的特征传播阶段(插值阶段)，最后再与I_h进行交互融合
+        _3daffordance = self.decoder(T_o_, I_h.permute(0,2,1), F_p_wise)
+        
+        return _3daffordance
+```
+#### 文本编码
+
+使用 RoBerta 对交互文本和几何结构文本进行编码这块，需要注意在对交互文本进行编码时，会按照 "," 将文本切分为多个句子，对每个句子独立进行编码:
+
+```bash
+原始交互文本:
+
+pour the liquid from the spout of the kettle using people’s hand, grasp the kettle using person's hand around handle, open the kettle using people's fingers on the lid
+
+切分后:
+
+pour the liquid from the spout of the kettle using people’s hand
+grasp the kettle using person's hand around handle
+open the kettle using people's fingers on the lid
+```
+
+这样做的原因是因为交互文本由当前图片反映的交互行为和模型额外补充的当前物体存在的其他交互行为构成，他们之间的关系是独立的。而几何结构文本则是单一连贯的几何描述，无需切分，直接对整句进行编码。
+
+
+
