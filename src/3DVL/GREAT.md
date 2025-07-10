@@ -612,24 +612,26 @@ class Decoder(nn.Module):
         # p_i[0] 为坐标
         p_0, p_1, p_2, p_3 = encoder_p  # 逐层点云特征列表
         
-        # 传入数据维度: (1,1,512) , (1,64,512) , 点云特征和几何结构特征做特征融合
-        p_3[1] = self.cmff(T_o, p_3[1].transpose(-2, -1))
+        # 1. 传入数据维度: (1,1,512) , (1,64,512) , 点云特征和几何结构特征做特征融合
+        p_3[1] = self.cmff(T_o, p_3[1].transpose(-2, -1)) # (1,512,64)
 
-        up_sample = self.fp3(p_2[0], p_3[0], p_2[1], p_3[1])   
+        # 2. 进入PointNet++经典的特征传播阶段
+        up_sample = self.fp3(p_2[0], p_3[0], p_2[1], p_3[1]) # (1,512,128)
         
-
-        up_sample = self.fp2(p_1[0], p_2[0], p_1[1], up_sample)    
+        up_sample = self.fp2(p_1[0], p_2[0], p_1[1], up_sample) # (1,512,512)  
         
-       
-        up_sample = self.fp1(p_0[0], p_1[0], torch.cat([p_0[0], p_0[1]],1), up_sample) 
+        up_sample = self.fp1(p_0[0], p_1[0], torch.cat([p_0[0], p_0[1]],1), up_sample) # (1,512,2048) 
         
-        F_I = self.reshape(I_h.permute(0,2,1))  
-
+        # 3. I_h reshape后 (1,512,2048)
+        F_I = self.reshape(I_h.permute(0,2,1))
+        
+        # 4. 图像交互信息与点云特征做融合: 拼接后，通道维度上进行特征融合，同时降维: (1,512,2048)
         F_j = torch.cat((F_I, up_sample),dim=1)
-        F_j_fusion = self.fusion(F_j)        
-
+        F_j_fusion = self.fusion(F_j) 
+        
+        # 5. F_j_fusion.permute后(1,2048,512) --> (1,2048,1)
         _3daffordance = self.out_head(F_j_fusion.permute(0, 2, 1))                   
-        _3daffordance = self.sigmoid(_3daffordance)
+        _3daffordance = self.sigmoid(_3daffordance) # 生成功能区域掩码
 
         return _3daffordance
 ```   
