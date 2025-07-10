@@ -427,17 +427,17 @@ class GREAT(nn.Module):
         # 2， PointNet++ 对点云进行编码
         F_p_wise = self.point_encoder(xyz)
         # 3. Roberta 对交互文本和几何结构文本进行编码
-        T_h= self.text_encoder(text_human)
-        T_o = self.text_encoder2(text_object)
+        T_h= self.text_encoder(text_human) # (batch,3,512)
+        T_o = self.text_encoder2(text_object) # (batch,1,512)
         
         # 4. 交互文本和几何结构文本的信息通过改良的交叉注意力机制进行交互融合
-        T_h_, T_o_ =self.affordance_dictionary_fusion(T_h, T_o)     
+        T_h_, T_o_ =self.affordance_dictionary_fusion(T_h, T_o)  # 维度同上，均保持不变
 
         # 5. 交互文本信息与图像信息进行融合
-        I_h = self.img_text_fusion(F_i,T_h_)         
+        I_h = self.img_text_fusion(F_i,T_h_)   # (batch,512,49)
         
         # 6. 几何结构文本信息与点云信息进行融合，然后进入pointnet++的特征传播阶段(插值阶段)，最后再与I_h进行交互融合
-        _3daffordance = self.decoder(T_o_, I_h.permute(0,2,1), F_p_wise)
+        _3daffordance = self.decoder(T_o_, I_h.permute(0,2,1), F_p_wise) # T_o_(batch,1,512)，I_h.permute(batch,49,512)，点云特征 
         
         return _3daffordance
 ```
@@ -459,5 +459,238 @@ open the kettle using people's fingers on the lid
 
 这样做的原因是因为交互文本由当前图片反映的交互行为和模型额外补充的当前物体存在的其他交互行为构成，他们之间的关系是独立的。而几何结构文本则是单一连贯的几何描述，无需切分，直接对整句进行编码。
 
+#### 改良的交叉注意力
+
+人类通过同时分析物体的 功能意图（如"倒水"）和 几何属性（如"壶嘴的形状"）来推断交互可能性。交叉注意力模拟了这种双向推理过程，通过建立意图与几何的显式关联，实现类似人类的类比推理能力。
+
+```python
+class Cross_Attention(nn.Module):    
+    ...
+    def forward(self, hk, ok):
+
+        '''
+        hk : human knowledge [B,N_hk,C]
+        ok : object knowledge [B,N_ok,C]
+        '''
+
+        # 用意图文本（如"pour"）筛选相关的几何特征（强化"壶嘴"结构，弱化"把手"）
+        hk_q = self.proj_hq(hk)                                        
+        ok_key = self.proj_ok(ok)                                       
+        ok_value = self.proj_ov(ok)
+
+        ok_key_ = torch.cat((hk_q,ok_key),dim=1)  # 强化人类意图在物体语义推理中的引导作用
+        ok_value_ = torch.cat((hk_q,ok_value),dim=1) 
+
+        atten_I1 = torch.bmm(hk_q, ok_key_.permute(0, 2, 1))*self.scale                 
+        atten_I1 = atten_I1.softmax(dim=-1)                        
+        I_1 = torch.bmm(atten_I1, ok_value_)  
+
+        I_1 = self.layernorm(hk + I_1) 
+
+        # 用几何结构（如"cylindrical handle"）修正意图理解（排除与几何矛盾的意图）
+        ok_q = self.proj_oq(ok)
+        hk_key = self.proj_hk(hk)
+        hk_value = self.proj_hv(hk)
+
+        hk_key_ = torch.cat((ok_q,hk_key),dim=1)  # 利用物体结构辅助推断更多人类交互意图
+        hk_value_ = torch.cat((ok_q,hk_value),dim=1)
+                              
+        atten_I2 = torch.bmm(ok_q, hk_key_.permute(0, 2, 1))*self.scale                 
+        atten_I2 = atten_I2.softmax(dim=-1)
+        I_2 = torch.bmm(atten_I2, hk_value_)                              
+                                
+        I_2 = self.layernorm(ok + I_2)    
+        return I_1, I_2
+```
+#### 几何结构信息与交互信息的融合
 
 
+```python
+class affordance_dictionary_fusion(nn.Module):
+    ...
+    def forward(self,f_hk,f_ok):
+        # 第一阶段：语义对齐（cross attention）➜ 把 Human 与 Object 信息“连接”起来
+        H, O = self.cross_atten(f_hk, f_ok)
+        # 第二阶段：结构融合（self attention）➜ 在 Human 内部或 Object 内部 “整理、总结、泛化”          
+        H_= self.h_atten(H)
+        O_= self.o_atten(O)
+        return H_, O_
+```
+#### 交互信息与图像特征的融合
+
+```python
+class img_text_fusion(nn.Module):
+    def __init__(self, emb_dim = 512, proj_dim = 512):
+        class SwapAxes(nn.Module):
+            def __init__(self):
+                super().__init__()
+            
+            def forward(self, x):
+                return x.transpose(1, 2)
+        super().__init__()
+
+        self.emb_dim = emb_dim
+        self.proj_dim = proj_dim
+        self.fusion = nn.Sequential(
+            nn.Conv1d(2*self.emb_dim, self.emb_dim, 1, 1),
+            nn.BatchNorm1d(self.emb_dim),
+            nn.ReLU()
+        )         
+        self.reshape = nn.Sequential(
+            nn.Linear(3, 3 * 8), # (batch,512,24)
+            SwapAxes(), # (batch,24,512)
+            nn.BatchNorm1d(3 * 8),
+            nn.ReLU(),
+            SwapAxes(), # (batch,512,24)
+            nn.Linear(3 * 8, 49), # （batch,512,49)
+        )
+
+    # F_i (batch,512,49) --> (batch,channel,H*W) 
+    def forward(self,F_i,T_h_):    
+        # T_h_(batch,3,512) ---> 转置后 (batch,512,3) --> reshape后 (batch,512,49)
+        T_h_ = self.reshape(T_h_.permute(0,2,1))
+        # 拼接后: (batch,1024,49)  
+        I_ = torch.cat((F_i, T_h_),dim=1)
+        # 通道维度上进行特征融合，同时降维: (batch.512,49)
+        I_ = self.fusion(I_)  
+        return I_
+```
+#### 解码阶段
+
+```python
+class Decoder(nn.Module):
+    def __init__(self, additional_channel, emb_dim, proj_dim):
+        class SwapAxes(nn.Module):
+            def __init__(self):
+                super().__init__()
+            
+            def forward(self, x):
+                return x.transpose(1, 2)
+        super().__init__()
+        
+        self.emb_dim = emb_dim
+        self.proj_dim = proj_dim
+        #upsample
+        self.fp3 = PointNetFeaturePropagation(in_channel=512+self.emb_dim, mlp=[768, 512])   
+        self.fp2 = PointNetFeaturePropagation(in_channel=832, mlp=[768, 512])  
+        self.fp1 = PointNetFeaturePropagation(in_channel=518+additional_channel, mlp=[512, 512]) 
+
+        self.cmff = Cross_Modal_Feature_Fusion(emb_dim, proj_dim)
+        self.out_head = nn.Sequential(
+            nn.Linear(self.emb_dim, self.emb_dim // 8),
+            SwapAxes(),
+            nn.BatchNorm1d(self.emb_dim // 8),
+            nn.ReLU(),
+            SwapAxes(),
+            nn.Linear(self.emb_dim // 8, 1),
+        )
+        self.reshape = nn.Sequential(
+            nn.Linear(49, 49 * 8),
+            SwapAxes(),
+            nn.BatchNorm1d(49 * 8),
+            nn.ReLU(),
+            SwapAxes(),
+            nn.Linear(49 * 8, 2048),
+        )          
+        self.sigmoid = nn.Sigmoid()
+        self.fusion = nn.Sequential(
+            nn.Conv1d(2*self.emb_dim, self.emb_dim, 1, 1),
+            nn.BatchNorm1d(self.emb_dim),
+            nn.ReLU()
+        )  
+    
+    def forward(self, T_o, I_h, encoder_p):
+
+        '''
+        T_o --->object knowledge embedding   (batch,1,512)
+        I_h ---> [B, N_i, C] (batch,49,512)
+        encoder_p  ---> [Hierarchy feature] 
+        '''
+        B, _, _ = I_h.shape
+
+        # p_i[1]: (1,3,2048) , （1，320，512) , (1,512,128) , (1,512,64) --> (batch,features,points)
+        # p_i[0] 为坐标
+        p_0, p_1, p_2, p_3 = encoder_p  # 逐层点云特征列表
+        
+        # 传入数据维度: (1,1,512) , (1,64,512) , 点云特征和几何结构特征做特征融合
+        p_3[1] = self.cmff(T_o, p_3[1].transpose(-2, -1))
+
+        up_sample = self.fp3(p_2[0], p_3[0], p_2[1], p_3[1])   
+        
+
+        up_sample = self.fp2(p_1[0], p_2[0], p_1[1], up_sample)    
+        
+       
+        up_sample = self.fp1(p_0[0], p_1[0], torch.cat([p_0[0], p_0[1]],1), up_sample) 
+        
+        F_I = self.reshape(I_h.permute(0,2,1))  
+
+        F_j = torch.cat((F_I, up_sample),dim=1)
+        F_j_fusion = self.fusion(F_j)        
+
+        _3daffordance = self.out_head(F_j_fusion.permute(0, 2, 1))                   
+        _3daffordance = self.sigmoid(_3daffordance)
+
+        return _3daffordance
+```   
+
+##### 点云特征与几何结构特征的融合
+
+```python
+class Cross_Modal_Feature_Fusion(nn.Module):
+    def __init__(self, emb_dim, proj_dim):
+        class SwapAxes(nn.Module):
+            def __init__(self):
+                super().__init__()
+            
+            def forward(self, x):
+                return x.transpose(1, 2)
+        super().__init__()
+        self.emb_dim = emb_dim
+        self.proj_dim = proj_dim
+        self.cross_atten1 = Cross_Attention(emb_dim = self.emb_dim, proj_dim = self.proj_dim)
+
+        # 假设输入数据维度为 (1,64,512) : 先降维，进行信息压缩
+        self.fc = nn.Sequential(
+            nn.Linear(self.emb_dim, self.emb_dim//2), # (1,64,256) 
+            SwapAxes(), # (1,256,64) 
+            nn.BatchNorm1d(self.emb_dim // 2),
+            nn.ReLU(),
+            SwapAxes(), # (1,64,256) 
+            nn.Linear(self.emb_dim//2, self.emb_dim), # (1,64,512)
+            SwapAxes(), # (1,512,64)
+            nn.BatchNorm1d(self.emb_dim),
+            SwapAxes(), # (1,64,512)
+        )
+
+        self.norm1 = nn.LayerNorm(self.emb_dim)
+        self.norm2 = nn.LayerNorm(self.emb_dim)
+        self.pool = nn.AdaptiveAvgPool1d(1)
+
+        self.fusion = nn.Sequential(                                        
+            nn.Conv1d(2*self.emb_dim, self.emb_dim, 1, 1),
+            nn.BatchNorm1d(self.emb_dim),   
+            nn.ReLU()        
+        )
+
+    # (1,1,512) , (1,64,512)    
+    def forward(self,f_t,f_p):
+        _, N_P, _ = f_p.size()
+        # 1. 应用改良的交叉注意力机制
+        f_to, f_po = self.cross_atten1(f_t, f_p)    
+
+        # 2. 注意力后，加上经典的: x + FNN 
+        f_to = f_to + self.fc(f_to)                     
+        f_po = f_po + self.fc(f_po)
+
+        # 3. f_to.permute维度(1,512,1) --> pool后(1,512,1)
+        f_t_p = self.pool(f_to.permute(0,2,1))
+        # 4. 维度扩展到64 --> (1,512,64)                 
+        f_t_r = f_t_p.repeat(1, 1, N_P)               
+
+        # 5. f_po.permute维度(1,512,64) --> 拼接后(1,1024,64) 
+        joint = torch.cat((f_po.permute(0,2,1), f_t_r), dim = 1)
+        # 6. 通道维度作信息融合(1,512,64)
+        output = self.fusion(joint)   
+        return output
+```
