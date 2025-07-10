@@ -7,7 +7,7 @@ category:
 tag:
   - 3D-VL
   - 3D Affordance
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-06-15
 cover: assets/cover/GREAT.png
@@ -108,59 +108,110 @@ CoT及其变体通过多步推理增强MLLMs能力。例如：
 
 ## 方法
 
-**1. 框架概述**  
+GREAT 的输入为 ${P, I}$，其中 $P \in \mathbb{R}^{N \times 4}$ 是点云，包含物体的坐标 $P\_c \in \mathbb{R}^{N \times 3}$ 和其对应的 3D 可供性标注 $P\_{label} \in \mathbb{R}^{N \times 1}$，$I \in \mathbb{R}^{3 \times H \times W}$ 为图像。目标是优化模型 $f\_\theta$，输出 3D 物体可供性 $\varphi$，即：
+
+$$
+\varphi = f_\theta(P_c, I)
+$$
+
+如图2所示，首先使用 ResNet \[9] 和 PointNet++ \[43] 提取特征，分别得到 $F\_i \in \mathbb{R}^{C \times H\_1 \times W\_1}$ 和 $F\_p \in \mathbb{R}^{C \times N\_p}$，随后将 $F\_i$ reshape 为 $F\_i \in \mathbb{R}^{C \times N\_i}$（其中 $N\_i = H\_1 \times W\_1$）。接着通过多头可供性链式思维（MHACoT）策略对交互图像进行推理，挖掘不变几何属性与潜在交互意图。
 
 ![](GREAT/5.png)
 
-GREAT 的输入为点云 $P \in \mathbb{R}^{N \times 4}$（含坐标 $P_c$ 和功能标注 $P_{label}$）和图像 $I \in \mathbb{R}^{3 \times H \times W}$，输出为3D功能区域 $\phi = f_\theta(P_c, I)$。整体流程（如图2所示）包括：  
+然后，使用 Roberta \[28] 编码推理结果，通过交叉注意力机制计算对象几何特征 $\bar{T}*o$ 和可供性意图特征 $\bar{T}*a$（见 Sec. 3.2）。GREAT 利用跨模态自适应融合模块（CMAFM）将这些知识注入点云特征并与图像特征融合，得到融合特征 $F*{tp}, F*{ti}$（见 Sec. 3.3）。最后将这两个特征送入解码器以获得可供性输出 $\varphi$，并通过复合损失优化整个流程（见 Sec. 3.4）。
 
-- 通过 ResNet [9](https://arxiv.org/abs/1512.03385) 和 PointNet++ [43](https://arxiv.org/abs/1706.02413) 提取特征 $\mathbf{F}_i$ 和 $\mathbf{F}_p$；  
+---
 
-- 利用微调的 MLLM（InternVL [4](https://arxiv.org/abs/2404.16821)）进行多步推理（MHACoT）；  
+### 3.2 Multi-Head Affordance Chain-of-Thought
 
-- 通过 Cross-Modal Adaptive Fusion Module (CMAFM) 融合几何与意图知识；  
+#### Fine-Tuning MLLM
 
-- 解码器联合预测功能区域 $\phi$，损失函数为 $\mathcal{L}_{total} = \mathcal{L}_{focal} + \mathcal{L}_{dice}$。  
+为了获得对物体可供性更深入的理解，我们对 InternVL \[4] 使用可学习的 Adapter \[10] 进行微调，仅更新 Adapter 模块（10 个 epoch，学习率 4e-5，LoRA rank 为 16），其余参数保持冻结，以保持原始模型识别能力的同时增强其推理能力。
 
-**2. 多步推理（MHACoT）**  
+#### Object-Head Reasoning（几何推理）
 
-分为两部分：  
+该部分包含：
 
-- **Object-Head Reasoning**：  
+* **物体交互感知（Object Interaction Perception）**：识别图像中物体与人发生交互的部分。Prompt 示例为：“指出图像中物体与人交互的部分。”
 
-  - 交互部件定位（提示：“*Point out which part interacts...*”）；  
+* **几何结构推理（Geometric Structure Reasoning）**：进一步从几何结构角度推理为什么该部位适合交互。Prompt 示例为：“从几何结构解释该部位可以交互的原因。”
 
-  - 几何属性推理（提示：“*Explain why this part can interact...*”），生成特征 $\mathbf{T}_o$。  
+#### Affordance-Head Reasoning（类比推理）
 
-- **Affordance-Head Reasoning**：  
+该部分包含：
 
-  - 交互过程描述（提示：“*Describe the interaction...*”）；  
+* **交互细节描述（Interaction Detailed Description）**：描述图像中人与物体之间的完整交互过程，生成细粒度表示。Prompt 示例为：“描述图像中人与物体的交互方式。”
 
-  - 潜在意图类比（提示：“*List two additional interactions...*”），生成特征 $\mathbf{T}_a$。  
+* **交互类比推理（Interactive Analogical Reasoning）**：模拟人类对交互方式的联想，挖掘其他可能交互意图，增强类比能力。Prompt 示例为：“列举两个该物体常见的其他交互方式。”
 
-通过 Roberta [28](https://arxiv.org/abs/1907.11692) 编码后，交叉注意力对齐特征：  
+#### Knowledge Encoding and Integration
 
-$$\bar{\mathbf{T}}_o = f_\delta(f_m(\mathbf{T}_o, \mathbf{T}_a)), \quad \bar{\mathbf{T}}_a = f_\delta(f_m(\mathbf{T}_a, \mathbf{T}_o))$$  
+从 Object-Head 得到的几何属性描述与 Affordance-Head 推理的交互描述被 Roberta 编码为两个特征：
 
-**3. 跨模态融合（CMAFM）**  
+* $T\_o \in \mathbb{R}^{N\_o \times C}$：物体几何知识特征
+* $T\_a \in \mathbb{R}^{N\_a \times C}$：可供性意图知识特征
 
-- 将几何知识 $\bar{\mathbf{T}}_o$ 注入点云特征 $\mathbf{F}_p$：  
+通过交叉注意力层 $f\_m$ 与自注意力层 $f\_\delta$ 对齐二者，公式如下：
 
-  - 投影为 $\mathbf{Q}, \mathbf{K}, \mathbf{V}$，计算交叉注意力 $\mathbf{F}'_p$（公式2）；  
+$$
+\bar{T}_o = f_\delta(f_m(T_o, T_a)), \quad \bar{T}_a = f_\delta(f_m(T_a, T_o))
+$$
 
-  - 通过全连接层和卷积融合，得到 $\mathbf{F}_{tp}$。  
+---
 
-- 将意图知识 $\bar{\mathbf{T}}_a$ 直接与图像特征 $\mathbf{F}_i$ 拼接，得到 $\mathbf{F}_{ti}$。  
+### 3.3 Cross-Modal Adaptive Fusion Module (CMAFM)
 
-**4. 解码与输出**  
+为了将几何属性与点云特征更好地对齐融合，CMAFM 将 $\bar{T}\_o$ 融合至 PointNet++ 最深层特征，并与图像特征联合用于预测。
 
-融合特征 $\mathbf{F}_\alpha = f[\Gamma(\mathbf{F}_{ti}), \mathbf{F}_{tp}]$ 通过解码器生成功能热图 $\phi = \sigma(f_\phi(\mathbf{F}_\alpha))$，其中 $\sigma$ 为 Sigmoid 函数。  
- 
-**关键设计**（如图5所示）：  
+具体地，对点云特征 $F\_p$ 和知识特征 $\bar{T}\_o$ 进行线性映射形成 Query、Key、Value：
 
-- **几何-意图协同**：MHACoT 同时建模物体属性和交互意图，提升开放词汇泛化性；  
+* $Q = F\_p W\_1$
+* $K = \bar{T}\_o W\_2$
+* $V = \bar{T}\_o W\_3$
 
-- **动态融合**：CMAFM 自适应对齐点云与图像模态，避免特征偏差(如表3消融实验所示)
+跨注意力融合公式为：
+
+$$
+F_p' = \left( \text{softmax}\left( \frac{Q^\top \cdot K}{\sqrt{d}} \right) \cdot V^\top \right)^\top
+$$
+
+最终点云融合特征表示为：
+
+$$
+P_o = f\left[ F_p' + f_\phi(F_p'), \Theta(\bar{T}_o' + f_\phi(\bar{T}_o')) \right]
+$$
+
+其中 $f\_\phi$ 为全连接层，$\Theta$ 表示池化后扩展为 $RC \times N\_p$，$f$ 为 $1 \times 1$ 卷积，输出 $P\_o$ 上采样至原始点数后记为：
+
+$$
+F_{tp} = \text{FP}(P_o)
+$$
+
+图像特征 $F\_i$ 与意图特征 $\bar{T}\_a$ 融合表示为：
+
+$$
+F_{ti} = f[\Gamma(\bar{T}_a), F_i], \quad F_{ti} \in \mathbb{R}^{C \times N_i}
+$$
+
+---
+
+### 3.4 Decoder and Loss Functions
+
+最终将融合后的图像特征 $F\_{ti}$ 和点云特征 $F\_{tp}$ 拼接后送入解码器输出可供性预测：
+
+$$
+F_\alpha = f[\Gamma(F_{ti}), F_{tp}], \quad \varphi = \sigma(f_\varphi(F_\alpha))
+$$
+
+其中 $\sigma$ 为 sigmoid 激活，$f\_\varphi$ 为输出头，$F\_\alpha \in \mathbb{R}^{C \times N}$，$\varphi \in \mathbb{R}^{N \times 1}$ 是最终的 3D 可供性预测。
+
+损失函数由 focal loss \[26] 与 dice loss \[37] 组成：
+
+$$
+\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{focal}} + \mathcal{L}_{\text{dice}}
+$$
+
+这种设计无需依赖具体的可供性分类标签，而是通过监督点级热图，将 3D 可供性与交互图像直接联系起来。
 
 ## 代码
 
