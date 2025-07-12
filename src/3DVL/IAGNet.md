@@ -7,7 +7,7 @@ category:
 tag:
   - 3D-VL
   - 3D Affordance
-  - 已发布
+  - 编辑中
 footer: 技术共建，知识共享
 date: 2025-07-11
 author:
@@ -166,3 +166,176 @@ $$
 - **ARM模块**：通过双路交叉注意力分别建模物体-主体（$\boldsymbol{\Theta}_1$）和物体-场景（$\boldsymbol{\Theta}_2$）交互
 
 - **互优化机制**：$\mathcal{L}_{KL}$ 使功能表征与对齐特征相互增强（如图15所示）
+
+## 代码
+
+### 数据集
+
+> 数据集目录下的组织方式:
+> ![](IAGNET/5.png)
+
+1. 数据集初始化
+
+```python
+class PIAD(Dataset):
+    def __init__(self, run_type, setting_type, point_path, img_path, box_path, pair=2, img_size=(224, 224)):
+        super().__init__()
+
+        self.run_type = run_type # train/val/test
+        self.p_path = point_path
+        self.i_path = img_path
+        self.b_path = box_path # 记录物体边界框
+        self.pair_num = pair
+        self.affordance_label_list = ['grasp', 'contain', 'lift', 'open', 
+                        'lay', 'sit', 'support', 'wrapgrasp', 'pour', 'move', 'display',
+                        'push', 'listen', 'wear', 'press', 'cut', 'stab']
+        
+        ...                
+
+        '''
+        Seen
+        '''
+        if setting_type == 'Seen':
+            number_dict = {'Earphone': 0, 'Bag': 0, 'Chair': 0, 'Refrigerator': 0, 'Knife': 0, 'Dishwasher': 0, 'Keyboard': 0, 'Scissors': 0, 'Table': 0, 
+            'StorageFurniture': 0, 'Bottle': 0, 'Bowl': 0, 'Microwave': 0, 'Display': 0, 'TrashCan': 0, 'Hat': 0, 'Clock': 0, 
+            'Door': 0, 'Mug': 0, 'Faucet': 0, 'Vase': 0, 'Laptop': 0, 'Bed': 0}
+
+        # 读取出所有图片路径，存储了物体边界框文件路径 
+        self.img_files = self.read_file(self.i_path)
+        self.box_files = self.read_file(self.b_path)
+        self.img_size = img_size
+
+        if self.run_type == 'train':
+           # 读取出所有点云文件路径,同时记录每类物体共对应多少不同的点云
+            self.point_files, self.number_dict = self.read_file(self.p_path, number_dict)
+            self.object_list = list(number_dict.keys())
+            self.object_train_split = {}
+            start_index = 0
+            # 记录每类物体对应的点云文件下标索引区间
+            for obj_ in self.object_list:
+                temp_split = [start_index, start_index + self.number_dict[obj_]]
+                self.object_train_split[obj_] = temp_split
+                start_index += self.number_dict[obj_]
+        else:
+            self.point_files = self.read_file(self.p_path)
+```
+2. 获取数据
+
+```python
+    def __getitem__(self, index):
+        # 1. 获取图片，Box框文件路径
+        img_path = self.img_files[index]
+        box_path = self.box_files[index]
+
+        if (self.run_type=='val'):
+            point_path = self.point_files[index]
+        else:
+            # 2. 从文件路径中提取物体名
+            object_name = img_path.split('_')[-3]
+            # 3. 一张图片对应多张同物体但形状不同的点云图片
+            range_ = self.object_train_split[object_name]
+            point_sample_idx = random.sample(range(range_[0],range_[1]), self.pair_num)
+
+        Img = Image.open(img_path).convert('RGB')
+
+        if(self.run_type == 'train'):
+            # 4. 随机裁剪图片，同时获取裁剪后的物体框(交互主体框，目标物体框)
+            Img, subject, object = self.get_crop(box_path, Img, self.run_type)
+            # 5. 对图片进行缩放，同时等比例对物体框做同样的缩放
+            sub_box, obj_box = self.get_resize_box(Img, self.img_size, subject, object)
+            sub_box, obj_box = torch.tensor(sub_box).float(), torch.tensor(obj_box).float()
+            Img = Img.resize(self.img_size)
+            Img = img_normalize_train(Img)
+            
+            Points_List = []
+            affordance_label_List = []
+            affordance_index_List = []
+            # 6. 加载点云
+            for id_x in point_sample_idx:
+                point_path = self.point_files[id_x]
+                Points, affordance_label = self.extract_point_file(point_path)
+                Points,_,_ = pc_normalize(Points)
+                Points = Points.transpose()
+                affordance_label, affordance_index = self.get_affordance_label(img_path, affordance_label)
+                Points_List.append(Points)
+                affordance_label_List.append(affordance_label)
+                affordance_index_List.append(affordance_index)
+
+        else:
+            ...
+
+        if(self.run_type == 'train'):
+            # 7. 图片，点云列表，点云功能区域掩码列表，点云功能区域索引列表，交互主体框，目标物体框
+            return Img, Points_List, affordance_label_List, affordance_index_List, sub_box, obj_box
+        else:
+            return Img, Point, affordance_label, img_path, point_path, sub_box, obj_box
+```
+### 模型
+
+```python
+class IAG(nn.Module):
+    ...        
+    def forward(self, img, xyz, sub_box, obj_box):
+
+        '''
+        img: [B, 3, H, W]
+        xyz: [B, 3, 2048]
+        sub_box: bounding box of the interactive subject
+        obj_box: bounding box of the interactive object
+        '''
+        
+        B, C, N = xyz.size()
+        ...
+        # 1. ResNet18 编码图像 (batch,512,7,7)
+        F_I = self.img_encoder(img)
+        # 2. 利用ROI Align技术，得到目标物体区域特征，交互主体区域特征，背景区域特征
+        ROI_box = self.get_roi_box(B).to(device)
+        F_i, F_s, F_e = self.get_mask_feature(img, F_I, sub_box, obj_box, device)
+        F_e = roi_align(F_e, ROI_box, output_size=(4,4))
+
+        # 3. PointNet编码点云 (batch,512,2048)
+        F_p_wise = self.point_encoder(xyz)
+        F_j = self.JRA(F_i, F_p_wise[-1][1])
+        affordance = self.ARM(F_j, F_s, F_e)
+
+        _3daffordance, logits, to_KL = self.decoder(F_j, affordance, F_p_wise)
+
+        return _3daffordance, logits, to_KL
+```
+
+关于利用ROI Align技术，得到目标物体区域特征，交互主体区域特征，背景区域特征过程的实现细节如下:
+
+```python
+    def get_mask_feature(self, raw_img, img_feature, sub_box, obj_box, device):
+        raw_size = raw_img.size(2)
+        current_size = img_feature.size(2)
+        B = img_feature.size(0)
+        scale_factor = current_size / raw_size
+
+        sub_box[:, :] = sub_box[:, :] * scale_factor
+        obj_box[:, :] = obj_box[:, :] * scale_factor
+
+        obj_mask = torch.zeros_like(img_feature)
+        obj_roi_box = []
+        for i in range(B):
+            obj_mask[i,:, int(obj_box[i][1]+0.5):int(obj_box[i][3]+0.5), int(obj_box[i][0]+0.5):int(obj_box[i][2]+0.5)] = 1
+            roi_obj = [obj_box[i][0], obj_box[i][1], obj_box[i][2]+0.5, obj_box[i][3]]
+            roi_obj.insert(0, i)
+            obj_roi_box.append(roi_obj)
+        obj_roi_box = torch.tensor(obj_roi_box).float().to(device)
+
+        sub_roi_box = []
+
+        Scene_mask = obj_mask.clone()
+        for i in range(B):
+            Scene_mask[i,:, int(sub_box[i][1]+0.5):int(sub_box[i][3]+0.5), int(sub_box[i][0]+0.5):int(sub_box[i][2]+0.5)] = 1
+            roi_sub = [sub_box[i][0], sub_box[i][1], sub_box[i][2], sub_box[i][3]]
+            roi_sub.insert(0,i)
+            sub_roi_box.append(roi_sub)
+        Scene_mask = torch.abs(Scene_mask - 1)
+        Scene_mask_feature = img_feature * Scene_mask
+        sub_roi_box = torch.tensor(sub_roi_box).float().to(device)
+        obj_feature = roi_align(img_feature, obj_roi_box, output_size=(4,4), sampling_ratio=4)
+        sub_feature = roi_align(img_feature, sub_roi_box, output_size=(4,4), sampling_ratio=4) 
+        return obj_feature, sub_feature, Scene_mask_feature
+```
