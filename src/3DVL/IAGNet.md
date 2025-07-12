@@ -172,7 +172,7 @@ $$
 ### 数据集
 
 > 数据集目录下的组织方式:
-> ![](IAGNET/5.png)
+
 
 1. 数据集初始化
 
@@ -469,8 +469,8 @@ class Joint_Region_Alignment(nn.Module):
         
         # 3. 计算相似度矩阵: (B,64,512) * (B,512,16) = (B,64,16)
         phi = torch.bmm(P.permute(0, 2, 1), I)*self.div_scale                           #[B, N_p, N_i]
-        phi_p = F.softmax(phi,dim=1) # 计算特征图中每个点和点云中所哟
-        phi_i = F.softmax(phi,dim=-1)  
+        phi_p = F.softmax(phi,dim=1) # 计算特征图中每个点和点云每个点特征的相似度
+        phi_i = F.softmax(phi,dim=-1) # 计算点云中每个点和特征图中每个点特征的相似度
 
         # 4. 
         I_enhance = torch.bmm(P, phi_p)                                                 #[B, C, N_i]
