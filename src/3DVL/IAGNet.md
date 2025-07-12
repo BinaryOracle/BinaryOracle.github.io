@@ -291,11 +291,17 @@ class IAG(nn.Module):
         # 2. 利用ROI Align技术，得到目标物体区域特征，交互主体区域特征，背景区域特征
         ROI_box = self.get_roi_box(B).to(device)
         F_i, F_s, F_e = self.get_mask_feature(img, F_I, sub_box, obj_box, device)
+        # 背景区域特征图经过ROI Align映射为4*4大小的特征图
+        # ROI_box 大小为 7*7 , 正好为resnet18最后生成的特征图的分辨率, 因为背景区域大小等于特征图大小
         F_e = roi_align(F_e, ROI_box, output_size=(4,4))
+        # F_i (batch,512,4,4) , F_s (batch,512,4,4) , F_e (batch,512,4,4)
 
-        # 3. PointNet编码点云 (batch,512,2048)
+        # 3. PointNet编码点云
+        # (B,3,2048) , (B,320,512) , (B,512,128) ， (B,512,64)
         F_p_wise = self.point_encoder(xyz)
+        # 4.  
         F_j = self.JRA(F_i, F_p_wise[-1][1])
+        # 5. 
         affordance = self.ARM(F_j, F_s, F_e)
 
         _3daffordance, logits, to_KL = self.decoder(F_j, affordance, F_p_wise)
@@ -310,32 +316,93 @@ class IAG(nn.Module):
         raw_size = raw_img.size(2)
         current_size = img_feature.size(2)
         B = img_feature.size(0)
+        # 1. 计算经过下采样得到的特征图相比于原始图片的缩小比例
         scale_factor = current_size / raw_size
-
+        # 2. 将交互主体框和目标物体框等比例缩小
         sub_box[:, :] = sub_box[:, :] * scale_factor
         obj_box[:, :] = obj_box[:, :] * scale_factor
-
+        
+        # 3. 根据目标物体框，将掩码图像中目标物体所在区域激活，得到目标物体区域掩码
         obj_mask = torch.zeros_like(img_feature)
         obj_roi_box = []
         for i in range(B):
             obj_mask[i,:, int(obj_box[i][1]+0.5):int(obj_box[i][3]+0.5), int(obj_box[i][0]+0.5):int(obj_box[i][2]+0.5)] = 1
-            roi_obj = [obj_box[i][0], obj_box[i][1], obj_box[i][2]+0.5, obj_box[i][3]]
-            roi_obj.insert(0, i)
+            roi_obj = [obj_box[i][0], obj_box[i][1], obj_box[i][2]+0.5, obj_box[i][3]]  # 对交互主体框位置进行精细调整(just a trick)
+            roi_obj.insert(0, i) # 插入批次索引 -- ROI Align对齐方法需要
             obj_roi_box.append(roi_obj)
         obj_roi_box = torch.tensor(obj_roi_box).float().to(device)
 
         sub_roi_box = []
-
+        # 4. 根据交互主体框，在目标物体区域掩码之上，激活交互主体所在区域
         Scene_mask = obj_mask.clone()
         for i in range(B):
             Scene_mask[i,:, int(sub_box[i][1]+0.5):int(sub_box[i][3]+0.5), int(sub_box[i][0]+0.5):int(sub_box[i][2]+0.5)] = 1
             roi_sub = [sub_box[i][0], sub_box[i][1], sub_box[i][2], sub_box[i][3]]
             roi_sub.insert(0,i)
             sub_roi_box.append(roi_sub)
+        # 5. 借助取反激活图片背景区域    
         Scene_mask = torch.abs(Scene_mask - 1)
+        # 6. 拿到图片背景区域特征图
         Scene_mask_feature = img_feature * Scene_mask
         sub_roi_box = torch.tensor(sub_roi_box).float().to(device)
+        # 7. 利用ROI Align技术，将目标物体区域框在特征图中框出的区域，映射为4*4大小的特征图
         obj_feature = roi_align(img_feature, obj_roi_box, output_size=(4,4), sampling_ratio=4)
+        # 8. 利用ROI Align技术，将交互主体区域框在特征图中框出的区域，映射为4*4大小的特征图
         sub_feature = roi_align(img_feature, sub_roi_box, output_size=(4,4), sampling_ratio=4) 
+        # 9. 返回目标物体区域特征图，交互主体区域特征图，背景区域特征图(未经ROI Align进行映射)
         return obj_feature, sub_feature, Scene_mask_feature
+```
+
+```python
+class Joint_Region_Alignment(nn.Module):
+    def __init__(self, emb_dim = 512, num_heads = 4):
+        super().__init__()
+        class SwapAxes(nn.Module):
+            def __init__(self):
+                super().__init__()
+            
+            def forward(self, x):
+                return x.transpose(1, 2)
+        self.emb_dim = emb_dim
+        self.div_scale = self.emb_dim ** (-0.5)
+        self.num_heads = num_heads
+
+        self.to_common = nn.Sequential(
+            nn.Conv1d(self.emb_dim, 2*self.emb_dim, 1, 1),
+            nn.BatchNorm1d(2*self.emb_dim),
+            nn.ReLU(),
+            nn.Conv1d(2*self.emb_dim, self.emb_dim, 1, 1),
+            nn.BatchNorm1d(self.emb_dim),
+            nn.ReLU()         
+        )
+
+        self.i_atten = Inherent_relation(self.emb_dim, self.num_heads)
+        self.p_atten = Inherent_relation(self.emb_dim, self.num_heads)
+        self.joint_atten = Inherent_relation(self.emb_dim, self.num_heads)
+
+    def forward(self, F_i, F_p):
+        '''
+        i_feature: [B, C, H, W]
+        p_feature: [B, C, N_p]
+        HW = N_i
+        '''
+
+        B,_,N_p = F_p.size()
+        F_i = F_i.view(B, self.emb_dim, -1)                                             #[B, C, N_i]
+
+        I = self.to_common(F_i)
+        P = self.to_common(F_p)
+
+        phi = torch.bmm(P.permute(0, 2, 1), I)*self.div_scale                           #[B, N_p, N_i]
+        phi_p = F.softmax(phi,dim=1)
+        phi_i = F.softmax(phi,dim=-1)  
+        I_enhance = torch.bmm(P, phi_p)                                                 #[B, C, N_i]
+        P_enhance = torch.bmm(I, phi_i.permute(0,2,1))                                  #[B, C, N_p]
+        I_ = self.i_atten(I_enhance.mT)                                                 #[B, N_i, C]
+        P_ = self.p_atten(P_enhance.mT)                                                 #[B, N_p, C]
+
+        joint_patch = torch.cat((P_, I_), dim=1)                                       
+        F_j = self.joint_atten(joint_patch)                                             #[B, N_p+N_i, C]
+
+        return F_j
 ```
