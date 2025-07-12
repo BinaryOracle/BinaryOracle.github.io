@@ -353,6 +353,78 @@ class IAG(nn.Module):
         return obj_feature, sub_feature, Scene_mask_feature
 ```
 
+```mermaid
+---
+title: Joint Region Alignment (JRA) 流程图
+---
+flowchart TB
+    subgraph 输入特征
+        F_i["图像特征 F_i [B, 512, 4, 4]"]
+        F_p["点云特征 F_p [B, 512, 64]"]
+    end
+
+    subgraph 特征投影
+        F_i_flat["展平图像特征 [B, 512, 16]"]
+        to_common["公共空间投影 (共享MLP)"]
+        I["投影后图像特征 I [B, 512, 16]"]
+        P["投影后点云特征 P [B, 512, 64]"]
+    end
+
+    subgraph 跨模态交互
+        phi["相似度矩阵 phi = Pᵀ·I / √d [B, N_p, N_i]"]
+        phi_p["点云→图像权重 softmax(phi, dim=1)"]
+        phi_i["图像→点云权重 softmax(phi, dim=-1)"]
+    end
+
+    subgraph 特征增强
+        I_enhance["图像增强特征 I_enhance = P·phi_p [B, C, N_i]"]
+        P_enhance["点云增强特征 P_enhance = I·phi_iᵀ [B, C, N_p]"]
+    end
+
+    subgraph 模态内建模
+        I_atten["图像自注意力 Inherent_relation [B, N_i, C]"]
+        P_atten["点云自注意力 Inherent_relation [B, N_p, C]"]
+    end
+
+    subgraph 联合输出
+        joint_patch["拼接特征 cat(P_, I_) [B, N_p+N_i, C]"]
+        F_j["联合特征 Joint Attention [B, N_p+N_i, C]"]
+    end
+
+    %% 数据流连接
+    输入特征 --> 特征投影
+    F_i --> F_i_flat
+    F_i_flat --> to_common --> I
+    F_p --> to_common --> P
+
+    特征投影 --> 跨模态交互
+    I --> phi
+    P --> phi
+
+    跨模态交互 --> 特征增强
+    phi_p --> I_enhance
+    phi_i --> P_enhance
+
+    特征增强 --> 模态内建模
+    I_enhance --> I_atten
+    P_enhance --> P_atten
+
+    模态内建模 --> 联合输出
+    I_atten --> joint_patch
+    P_atten --> joint_patch
+    joint_patch --> F_j
+```
+
+to_common 是一个跨模态特征投影模块，其核心目标是将来自不同模态（图像和点云）的特征映射到一个统一的公共特征空间，从而消除模态间的分布差异，为后续的跨模态交互提供基础。
+
+关键功能：
+
+- 非线性变换：通过MLP（多层感知机）对输入特征进行非线性映射。
+
+- 特征融合准备：将异构特征（图像网格特征 vs 点云无序特征）转换为同构表示，便于计算相似度。
+
+- 筛选关键信息：通过瓶颈结构（先升维后降维）过滤噪声，保留跨模态共享的显著特征。
+
 ```python
 class Joint_Region_Alignment(nn.Module):
     def __init__(self, emb_dim = 512, num_heads = 4):
@@ -386,16 +458,21 @@ class Joint_Region_Alignment(nn.Module):
         p_feature: [B, C, N_p]
         HW = N_i
         '''
-
-        B,_,N_p = F_p.size()
+        
+        B,_,N_p = F_p.size() # (B,512,64)
+        # 1. 物体区域特征图展平: (B,512,4,4) --> (B,512,4*4)
         F_i = F_i.view(B, self.emb_dim, -1)                                             #[B, C, N_i]
-
-        I = self.to_common(F_i)
-        P = self.to_common(F_p)
-
+        
+        # 2. 通过共享MLP迫使图像和点云特征在相同空间分布，消除模态差异
+        I = self.to_common(F_i) # (B,512,16)
+        P = self.to_common(F_p) # (B,512,64)
+        
+        # 3. 计算相似度矩阵: (B,64,512) * (B,512,16) = (B,64,16)
         phi = torch.bmm(P.permute(0, 2, 1), I)*self.div_scale                           #[B, N_p, N_i]
-        phi_p = F.softmax(phi,dim=1)
+        phi_p = F.softmax(phi,dim=1) # 计算特征图中每个点和点云中所哟
         phi_i = F.softmax(phi,dim=-1)  
+
+        # 4. 
         I_enhance = torch.bmm(P, phi_p)                                                 #[B, C, N_i]
         P_enhance = torch.bmm(I, phi_i.permute(0,2,1))                                  #[B, C, N_p]
         I_ = self.i_atten(I_enhance.mT)                                                 #[B, N_i, C]
