@@ -371,24 +371,24 @@ flowchart TB
     end
 
     subgraph 跨模态交互
-        phi["相似度矩阵 phi = Pᵀ·I / √d [B, N_p, N_i]"]
+        phi["相似度矩阵 phi = Pᵀ·I / √d [B, 64, 16]"]
         phi_p["点云→图像权重 softmax(phi, dim=1)"]
         phi_i["图像→点云权重 softmax(phi, dim=-1)"]
     end
 
     subgraph 特征增强
-        I_enhance["图像增强特征 I_enhance = P·phi_p [B, C, N_i]"]
-        P_enhance["点云增强特征 P_enhance = I·phi_iᵀ [B, C, N_p]"]
+        I_enhance["图像增强特征 I_enhance = P·phi_p [B, 512, 16]"]
+        P_enhance["点云增强特征 P_enhance = I·phi_iᵀ [B, 512, 64]"]
     end
 
     subgraph 模态内建模
-        I_atten["图像自注意力 Inherent_relation [B, N_i, C]"]
-        P_atten["点云自注意力 Inherent_relation [B, N_p, C]"]
+        I_atten["图像自注意力 Inherent_relation [B, 512, 16]"]
+        P_atten["点云自注意力 Inherent_relation [B, 512, 64]"]
     end
 
     subgraph 联合输出
-        joint_patch["拼接特征 cat(P_, I_) [B, N_p+N_i, C]"]
-        F_j["联合特征 Joint Attention [B, N_p+N_i, C]"]
+        joint_patch["拼接特征 cat(P_, I_) [B, 64+16, 512]"]
+        F_j["联合特征 Joint Attention [B, 64+16, 512]"]
     end
 
     %% 数据流连接
