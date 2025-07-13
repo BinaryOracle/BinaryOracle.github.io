@@ -488,3 +488,113 @@ class Joint_Region_Alignment(nn.Module):
 
 ![](IAGNet/6.png)
 
+```python
+class Affordance_Revealed_Module(nn.Module):
+    def __init__(self, emb_dim, proj_dim):
+        class SwapAxes(nn.Module):
+            def __init__(self):
+                super().__init__()
+            
+            def forward(self, x):
+                return x.transpose(1, 2)
+        super().__init__()
+        self.emb_dim = emb_dim
+        self.proj_dim = proj_dim
+        self.cross_atten = Cross_Attention(emb_dim = self.emb_dim, proj_dim = self.proj_dim)
+        self.fusion = nn.Sequential(
+            nn.Conv1d(2*self.emb_dim, self.emb_dim, 1, 1),
+            nn.BatchNorm1d(self.emb_dim),
+            nn.ReLU()
+        )
+
+    def forward(self, F_j, F_s, F_e):
+
+        '''
+        F_j: [B, N_p + N_i, C]  (B,80,512) 物体区域特征和点云特征的联合建模
+        F_s: [B, H, W, C]  (B,512,4,4)  交互区域特征
+        F_e: [B, H, W, C]  (B,512,4,4)  背景特征
+        '''
+
+        B,_,C = F_j.size()
+
+        # 拉平: (B,512,4,4) --> (B,512,4*4)
+        F_s = F_s.view(B, C, -1)                                        #[B, N_i, C]
+        F_e = F_e.view(B, C, -1)                                        #[B, N_i, C]
+        # 利用联合建模特征作为query，从交互区域特征和背景特征中提取相关信息分别单独加到自己身上
+        Theta_1, Theta_2 = self.cross_atten(F_j, F_s.mT, F_e.mT)        #[B, C, N_p + N_i]
+
+        # 通道维度完成拼接后，利用1x1卷积完成通道维度上的信息融合 
+        joint_context = torch.cat((Theta_1.mT, Theta_2.mT), dim=1)      #[B, 2C, N_p + N_i]
+        affordance = self.fusion(joint_context)                         #[B, C, N_p + N_i]
+        affordance = affordance.permute(0, 2, 1)                        #[B, N_p + N_i, C]
+
+        return affordance # （B,80,512)
+```
+
+```python
+class Decoder(nn.Module):
+    def __init__(self, additional_channel, emb_dim, N_p, N_raw, num_affordance):
+        class SwapAxes(nn.Module):
+            def __init__(self):
+                super().__init__()
+            
+            def forward(self, x):
+                return x.transpose(1, 2)
+        super().__init__()
+        
+        self.emb_dim = emb_dim
+        self.N_p = N_p
+        self.N = N_raw
+        self.num_affordance = num_affordance
+        #upsample
+        self.fp3 = PointNetFeaturePropagation(in_channel=512+self.emb_dim, mlp=[768, 512])  
+        self.fp2 = PointNetFeaturePropagation(in_channel=832, mlp=[768, 512]) 
+        self.fp1 = PointNetFeaturePropagation(in_channel=518+additional_channel, mlp=[512, 512]) 
+        self.pool = nn.AdaptiveAvgPool1d(1)
+
+        self.out_head = nn.Sequential(
+            nn.Linear(self.emb_dim, self.emb_dim // 8),
+            SwapAxes(),
+            nn.BatchNorm1d(self.emb_dim // 8),
+            nn.ReLU(),
+            SwapAxes(),
+            nn.Linear(self.emb_dim // 8, 1),
+        )
+
+        self.cls_head = nn.Sequential(
+            nn.Linear(2*self.emb_dim, self.emb_dim // 2),
+            nn.BatchNorm1d(self.emb_dim // 2),
+            nn.ReLU(),
+            nn.Linear(self.emb_dim // 2, self.num_affordance),
+            nn.BatchNorm1d(self.num_affordance)
+        )
+
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, F_j, affordance, encoder_p):
+
+        '''
+        obj --->        [F_j]
+        affordance ---> [B, N_p + N_i, C]
+        encoder_p  ---> [Hierarchy feature]
+        '''
+        B,_,_ = F_j.size()
+        p_0, p_1, p_2, p_3 = encoder_p
+        P_align, I_align = torch.split(F_j, split_size_or_sections=self.N_p, dim=1)     #[B, N_p, C] --- [B, N_i, C]
+        F_pa, F_ia = torch.split(affordance, split_size_or_sections = self.N_p, dim=1)  #[B, N_p, C] --- [B, N_i, C]
+
+        up_sample = self.fp3(p_2[0], p_3[0], p_2[1], P_align.mT)                        #[B, emb_dim, npoint_sa2]
+        up_sample = self.fp2(p_1[0], p_2[0], p_1[1], up_sample)                         #[B, emb_dim, npoint_sa1]                        
+        up_sample = self.fp1(p_0[0], p_1[0], torch.cat([p_0[0], p_0[1]],1), up_sample)  #[B, emb_dim, N]
+
+        F_pa_pool = self.pool(F_pa.mT)                                                  #[B, emb_dim, 1]
+        F_ia_pool = self.pool(F_ia.mT)                                                  #[B, emb_dim, 1]
+        logits = torch.cat((F_pa_pool, F_ia_pool), dim=1)                               #[B, 2*emb_dim, 1]
+        logits = self.cls_head(logits.view(B,-1))
+
+        _3daffordance = up_sample * F_pa_pool.expand(-1,-1,self.N)                      #[B, emb_dim, 2048]
+        _3daffordance = self.out_head(_3daffordance.mT)                                    #[B, 2048, 1]
+        _3daffordance = self.sigmoid(_3daffordance)
+
+        return _3daffordance, logits, [F_ia.mT.contiguous(), I_align.mT.contiguous()]
+```
