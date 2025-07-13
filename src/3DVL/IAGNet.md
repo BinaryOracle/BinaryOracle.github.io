@@ -172,7 +172,7 @@ $$
 ### 数据集
 
 > 数据集目录下的组织方式:
-
+> ![](IAGNET/5.png)
 
 1. 数据集初始化
 
@@ -472,14 +472,19 @@ class Joint_Region_Alignment(nn.Module):
         phi_p = F.softmax(phi,dim=1) # 计算特征图中每个点和点云每个点特征的相似度
         phi_i = F.softmax(phi,dim=-1) # 计算点云中每个点和特征图中每个点特征的相似度
 
-        # 4. 
-        I_enhance = torch.bmm(P, phi_p)                                                 #[B, C, N_i]
-        P_enhance = torch.bmm(I, phi_i.permute(0,2,1))                                  #[B, C, N_p]
+        # 4. 特征增强(按照相似度完成信息融合 + 自注意力完成内部信息建模)
+        I_enhance = torch.bmm(P, phi_p)  # (B,512,64) * (B,64,16) = （B,512,16）          [B, C, N_i]
+        P_enhance = torch.bmm(I, phi_i.permute(0,2,1)) # (B,512,16) * (B,16,64) = （B,512,64）  [B, C, N_p]
         I_ = self.i_atten(I_enhance.mT)                                                 #[B, N_i, C]
         P_ = self.p_atten(P_enhance.mT)                                                 #[B, N_p, C]
-
+        # I_ (B,16,512) , P_ (B,64,512)
+        
+        # 5. 联合建模: 拼接 (B,80,512)  +  自注意力
         joint_patch = torch.cat((P_, I_), dim=1)                                       
         F_j = self.joint_atten(joint_patch)                                             #[B, N_p+N_i, C]
 
         return F_j
 ```
+
+![](IAGNet/6.png)
+
