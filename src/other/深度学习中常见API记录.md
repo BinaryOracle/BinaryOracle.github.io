@@ -333,6 +333,15 @@ def greet(name):
 
 greet("Alice")
 ```
+#### 总结
+
+| 类型      | 例子                  | 含义                        |
+| ------- | ------------------- | ------------------------- |
+| 最基本装饰器  | `@func`             | `f = func(f)`             |
+| 装饰器工厂   | `@decorator(x)`     | `f = decorator(x)(f)`     |
+| 对象方法装饰器 | `@obj.method`       | `f = obj.method(f)`       |
+| 对象方法工厂  | `@obj.method(args)` | `f = obj.method(args)(f)` |
+
 
 #### 典型应用场景举例
 
