@@ -527,6 +527,70 @@ x.expand(2, 6)  # ❌ 报错！因为第 1 维是 3，不能变成 6
 | 是否可用于改变维度 | ❌ 否（维度必须兼容）                | ✅ 是                |
 | 常用于       | 高效广播，如 attention、masking 等 | 实际复制，如构造重复输入       |
 
+### @torch.no_grad()
+
+1. 在这个装饰器修饰的函数内，PyTorch 不会跟踪计算图，也不会计算梯度。
+
+2. 这样可以减少内存使用和计算开销，因为不需要保存中间变量用于反向传播。
+
+3. 适用于只需要前向推理且不需要更新模型参数的场景。
+
+### register_buffer
+
+```python
+# nn.Module 类中提供的方法
+register_buffer(name: str, tensor: Optional[torch.Tensor], persistent: bool = True)
+```      
+1. name (str)
+
+    * 缓冲区的名称（字符串）。
+
+    * 之后可以用 model.name 访问，比如 model.queue。
+
+2. tensor (torch.Tensor 或 None)
+    
+    * 要注册的张量。
+    
+    * 这个张量会成为模型的一个成员，但不会被视为可训练参数。
+    
+    * 也可以传 None，表示先占位，后面再赋值。
+
+3. persistent (bool，默认 True，PyTorch 1.8以后支持)
+
+    * 如果为 True，该缓冲区会包含在 state_dict() 中，即会被保存和加载。
+
+    * 如果为 False，缓冲区不会保存到 state_dict()，常用于临时缓存数据。  
+
+**register_buffer的作用和意义**：
+
+* 它会把一个张量（tensor）作为模型的缓冲区注册，不会被当作模型的可训练参数（不会出现在model.parameters()里，也不会参与梯度计算或优化）。
+
+* 但是，缓冲区会被自动保存到模型的状态字典（state_dict）中，也会被加载（load）和保存（save）。
+
+* 常用于保存一些模型的状态信息，但这些信息不需要训练，比如：均值、方差、队列、掩码等。
+
+### einsum
+
+`einsum` 是 **爱因斯坦求和约定（Einstein Summation）** 的简写，是一个非常强大且直观的张量操作工具。
+
+相比 `matmul`、`bmm`、`torch.matmul` 这类 API，`einsum` 让你**显式指定维度之间怎么相乘/求和/保留**。
+
+```python
+torch.einsum("维度规则", [tensor1, tensor2, ...])
+```
+
+* 引号中是 **对每个 tensor 的维度命名**
+
+* 相同的维度字母表示要做 **点积/求和**
+
+* 没有重复的维度字母表示保留该维度
+
+
+| einsum 表达式    | 等价操作                     | 输出形状   | 含义                  |
+| ------------- | ------------------------ | ------ | ------------------- |
+| `"nc,nc->n"`  | `(q * k).sum(dim=1)`     | (N,)   | 每个 query 与其正样本的点积   |
+| `"nc,ck->nk"` | `torch.matmul(q, queue)` | (N, K) | 每个 query 与所有负样本的相似度 |
+
 
 ## 模型
 
