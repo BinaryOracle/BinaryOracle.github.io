@@ -1,7 +1,7 @@
 ---
-title: 课程笔记
+title: 生成模型学习
 index: false
-icon: computer
+icon: sun
 article: false
 dir:
   order: 4
