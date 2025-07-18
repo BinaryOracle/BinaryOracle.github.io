@@ -136,6 +136,77 @@ $$
 \mathcal{L} = \mathcal{L}_{\text{itc}} + \mathcal{L}_{\text{mlm}} + \mathcal{L}_{\text{itm}}
 $$
 
+### Momentum Distillation 
+
+视觉-语言预训练所使用的图文对大多来自网页，因此存在较大的噪声。例如：正样本图文对往往关联性较弱，文本中可能包含与图像无关的信息，图像中也可能存在未被文本描述的实体。在对比学习（ITC）中，有些“负样本”文本可能实际上与图像语义一致；而在掩码语言建模（MLM）中，也可能存在多个与被 mask 单词同样合理甚至更好的替代词。但标准 one-hot 标签的监督会一律惩罚这些“非标答案”。
+
+为解决这一问题，ALBEF 提出使用 **动量模型（Momentum Model）生成伪标签（pseudo-targets）进行蒸馏监督**。动量模型是对主模型参数的滑动平均版本（exponential moving average），起到“老师模型”的作用。在训练中，主模型被训练去匹配动量模型的预测，从而提升鲁棒性和泛化能力。
+
+---
+
+**对比学习中的动量蒸馏:**
+
+设动量编码器生成的相似度为：
+
+$$
+s'(I, T) = g'_v(\mathbf{v}'_{\text{cls}})^\top g'_w(\mathbf{w}'_{\text{cls}}), \quad
+s'(T, I) = g'_w(\mathbf{w}_{\text{cls}})^\top g'_v(\mathbf{v}'_{\text{cls}})
+$$
+
+将其代入标准的对比学习 softmax 公式中，构造软标签（soft pseudo-target）$q^{\text{i2t}}, q^{\text{t2i}}$。然后定义 ITC 的动量蒸馏损失为：
+
+$$
+\mathcal{L}^{\text{mod}}_{\text{itc}} = (1 - \alpha) \mathcal{L}_{\text{itc}} +
+\frac{\alpha}{2} \mathbb{E}_{(I,T) \sim D} \left[
+\text{KL}(q^{\text{i2t}}(I) \parallel p^{\text{i2t}}(I)) +
+\text{KL}(q^{\text{t2i}}(T) \parallel p^{\text{t2i}}(T))
+\right]
+$$
+
+这里的 KL 表示 Kullback-Leibler 散度，衡量模型预测分布与动量模型生成的软标签之间的差异。
+
+---
+
+**掩码语言建模中的动量蒸馏:**
+
+设动量模型在图像 $I$ 和被 mask 的文本 $\hat{T}$ 上预测得到的概率分布为 $q^{\text{msk}}(I, \hat{T})$，主模型的预测为 $p^{\text{msk}}(I, \hat{T})$。对应的蒸馏损失定义为：
+
+$$
+\mathcal{L}^{\text{mod}}_{\text{mlm}} = (1 - \alpha) \mathcal{L}_{\text{mlm}} +
+\alpha \, \mathbb{E}_{(I,\hat{T}) \sim D} \, \text{KL}(q^{\text{msk}}(I, \hat{T}) \parallel p^{\text{msk}}(I, \hat{T}))
+$$
+
+这样的设计使得 MLM 模型不再被 one-hot 标签约束，可以学习更丰富的词汇表达，捕捉与图像内容相关的多种可能性。
+
+---
+
+![](ALBEF/3.png)
+
+如论文中的图 2 所示，动量模型生成的伪标签往往比真实标签更具多样性和语义丰富性。例如：
+
+* 原始文本：`"polar bear in the [MASK]"`
+  真实标签：`wild`
+  伪标签前五名：`zoo`, `pool`, `water`, `pond`, `wild`
+
+这种伪标签不仅能补充视觉信息中的遗漏，还能提供更灵活的语义参考。
+
+---
+
+通过引入动量蒸馏，ALBEF 能够：
+
+* 在噪声标签数据上提高学习效果；
+* 避免因 one-hot 标签过度惩罚合理预测；
+* 在多任务（如 ITC 和 MLM）中更稳定地训练；
+* 提高预训练模型在下游任务中的表现。
+
+动量蒸馏的总体损失是对原始监督信号与伪监督信号的加权组合，平衡其指导作用：
+
+$$
+\mathcal{L}^{\text{mod}} = \mathcal{L}^{\text{mod}}_{\text{itc}} + \mathcal{L}^{\text{mod}}_{\text{mlm}} + \mathcal{L}_{\text{itm}}
+$$
+
+其中 $\alpha$ 控制动量蒸馏信号的强度，实验中统一设为 0.4。
+
 ## Code Implementation
 
 ### Train
@@ -678,3 +749,4 @@ def forward(
         label_smoothing: float = 0.0,
     ) 
  ```
+
