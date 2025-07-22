@@ -103,4 +103,99 @@ BLIP（Bootstrapping Language-Image Pre-training）是一个新颖的 VLP 框架
 
   * 展示了在**大规模视觉-语言预训练中**使用合成图像描述的独特优势，提升了多模态学习效果。
 
+## Code Implementation
 
+### CapFilt 模块实现
+
+BLIP 使用 CapFilt 对多个大规模噪声网页图文数据集（包括 CC12M、CC3M 和 SBU Captions）进行增强，首先通过 captioner 为图像生成合成文本，再通过 filter 过滤掉与图像不匹配的原始和合成文本，最终构建出高质量的自举数据集（bootstrapped dataset），用于预训练新模型。
+
+在 CapFilt 模块微调阶段，BLIP 则基于高质量人工标注的数据集如 COCO Captions、Visual Genome 和 Flickr30K 进行训练和评估。
+
+经过 CapFilt 处理后，输出的数据集是经过图文对齐质量优化的图文对集合，有效提升了下游任务中的表现。
+
+#### 微调阶段
+
+```python
+def train(model, data_loader, optimizer, device):
+    for i, (image, caption, _) in data_loader:
+        loss = model(image, caption)      
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+def main(args, config):
+    #### Dataset #### 
+    train_dataset, val_dataset, test_dataset = create_dataset('caption_coco', config)  
+    
+    train_loader, val_loader, test_loader = create_loader([train_dataset, val_dataset, test_dataset],samplers,
+                                                          batch_size=[config['batch_size']]*3,num_workers=[4,4,4],
+                                                          is_trains=[True, False, False], collate_fns=[None,None,None])         
+
+    #### Model #### 
+    model = blip_decoder(pretrained=config['pretrained'], image_size=config['image_size'], vit=config['vit'], 
+                           vit_grad_ckpt=config['vit_grad_ckpt'], vit_ckpt_layer=config['vit_ckpt_layer'], 
+                           prompt=config['prompt'])
+    
+    optimizer = torch.optim.AdamW(params=model.parameters(), lr=config['init_lr'], weight_decay=config['weight_decay'])
+
+    #### Train ####         
+    for epoch in range(0, config['max_epoch']):     
+       train_stats = train(model, train_loader, optimizer, epoch, device)
+```
+
+```python
+class BLIP_Decoder(nn.Module):
+    def __init__(self,                 
+                 med_config = 'configs/med_config.json',  
+                 image_size = 384,
+                 vit = 'base',
+                 vit_grad_ckpt = False,
+                 vit_ckpt_layer = 0,
+                 prompt = 'a picture of ',
+                 ):
+        """
+        BLIP Captioner模块初始化，实现论文中提出的图像-文本跨模态编码器-解码器架构
+
+        Args:
+            med_config (str): 混合编码器-解码器模型配置文件路径，对应论文3.1节中提到的多模态融合模块配置
+            image_size (int): 输入图像尺寸，论文4.1节实验设置中使用384x384
+            vit (str): 视觉Transformer模型大小，论文中采用ViT-Base作为默认视觉编码器
+            vit_grad_ckpt (bool): 是否使用梯度检查点优化ViT显存占用，论文附录A中提到的训练优化策略
+            vit_ckpt_layer (int): ViT梯度检查点层数，用于平衡训练效率与显存使用
+            prompt (str): 图像描述生成的引导提示词，对应论文3.2节中使用的prompt engineering技术
+        """
+        super().__init__()
+        
+        self.visual_encoder, vision_width = create_vit(vit,image_size, vit_grad_ckpt, vit_ckpt_layer)  # 初始化视觉编码器，对应论文图1中的视觉Transformer
+        self.tokenizer = init_tokenizer()   # 初始化文本分词器，采用BERT分词器实现论文中的文本预处理
+        med_config = BertConfig.from_json_file(med_config)
+        med_config.encoder_width = vision_width
+        self.text_decoder = BertLMHeadModel(config=med_config)    # 初始化文本解码器，实现论文3.1节中的跨模态解码器
+        
+        self.prompt = prompt  # 存储图像描述引导提示词，用于论文3.3节中的条件生成任务
+        self.prompt_length = len(self.tokenizer(self.prompt).input_ids)-1  # 计算提示词token长度，用于后续解码时区分提示与生成文本
+        
+    def forward(self, image, caption):
+        
+        image_embeds = self.visual_encoder(image) 
+        image_atts = torch.ones(image_embeds.size()[:-1],dtype=torch.long).to(image.device)
+        
+        text = self.tokenizer(caption, padding='longest', truncation=True, max_length=40, return_tensors="pt").to(image.device) 
+        
+        text.input_ids[:,0] = self.tokenizer.bos_token_id
+        
+        decoder_targets = text.input_ids.masked_fill(text.input_ids == self.tokenizer.pad_token_id, -100)         
+        decoder_targets[:,:self.prompt_length] = -100
+     
+        decoder_output = self.text_decoder(text.input_ids, 
+                                           attention_mask = text.attention_mask, 
+                                           encoder_hidden_states = image_embeds,
+                                           encoder_attention_mask = image_atts,                  
+                                           labels = decoder_targets,
+                                           return_dict = True,   
+                                          )   
+        loss_lm = decoder_output.loss
+        
+        return loss_lm
+```
