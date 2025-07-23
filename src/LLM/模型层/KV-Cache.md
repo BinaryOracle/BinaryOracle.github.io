@@ -163,3 +163,12 @@ def main():
 if __name__ == "__main__":
     main()
 ```
+
+KV Cache 的引入是为了加速自回归模型的推理速度，具体体现在:
+
+1. 每轮推理时，只需要计算当前轮新增 token 的 Q/K/V，而不需要重新计算所有之前 token 的 Q/K/V。
+
+2. 缓存当前轮计算结果，下一轮推理时直接读取缓存结果。
+
+在首轮推理的过程中，我们传入的是 promt 提示词列表，并且 KV Cache 此时为空，还未进行初始化。因此首轮推理过程需要完成 promt 提示词列表的 keys 和 values 的缓存；由于 GPT2 由多层 GPT2Block 堆叠而成，而每一层 GPT2Block 都有一个 GPT2Attention 模块， 因此 KV Cache 需要准备好每一层 GPT2Attention 模块的 keys 和 values 缓存 (分层Cache - legacy_cache)。
+
