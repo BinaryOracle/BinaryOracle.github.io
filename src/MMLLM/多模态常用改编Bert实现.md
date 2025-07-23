@@ -16,4 +16,6 @@ author:
 
 <!-- more -->
 
+> 本文改编Bert代码讲解基于BLIP项目展开，代码链接: [BLIP/models/med.py](https://github.com/salesforce/BLIP/blob/main/models/med.py)
+
 
