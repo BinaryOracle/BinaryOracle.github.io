@@ -113,3 +113,53 @@ Output: Open AI is a new way to build AI that is more efficient and more efficie
 
 > 官方代码链接: [https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py](https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py)
 
+下面将给出使用了 KV Cache 进行推理的代码:
+
+```python
+import torch
+from transformers import GPT2Tokenizer, GPT2Config
+from modeling_gpt2 import GPT2LMHeadModel  # copy from huggingface , 删除了大量无关代码
+
+def generate_text(model, tokenizer, prompt, max_new_tokens=50, eos_token_id=198):
+    model.eval()
+    input_ids = tokenizer.encode(prompt, return_tensors="pt")
+    past_key_values = None
+    output_ids = input_ids.clone()
+
+    with torch.no_grad():
+        for step in range(max_new_tokens):
+            outputs = model(
+                input_ids=input_ids,
+                past_key_values=past_key_values,
+                use_cache=True
+            )
+            logits = outputs.logits
+            past_key_values = outputs.past_key_values
+
+            next_token_logits = logits[:, -1, :]
+            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+
+            output_ids = torch.cat([output_ids, next_token], dim=-1)
+
+            if next_token.item() == eos_token_id:
+                break
+
+            input_ids = next_token  # 采用KV Cache后，推理过程修改的关键: 下一步只送入新 token
+
+            print(f"step {step}: {tokenizer.decode(output_ids[0])}", flush=True)
+
+    return tokenizer.decode(output_ids[0])
+
+def main():
+    config = GPT2Config()
+    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    model = GPT2LMHeadModel(config)
+
+    prompt = "Once upon a time"
+    output = generate_text(model, tokenizer, prompt)
+    print("\nFinal output:")
+    print(output)
+
+if __name__ == "__main__":
+    main()
+```
