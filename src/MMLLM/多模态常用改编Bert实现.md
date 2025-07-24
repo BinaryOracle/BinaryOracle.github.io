@@ -293,7 +293,7 @@ class BertLMHeadModel(BertPreTrainedModel):
         reduction='mean',
         mode='multimodal', 
     ):
-        # 1. 
+        # 1. 调用BertModel
         outputs = self.bert(
             input_ids,
             attention_mask=attention_mask,
@@ -304,11 +304,13 @@ class BertLMHeadModel(BertPreTrainedModel):
             mode=mode,
         )
         
+        # 2. 解码
         sequence_output = outputs[0]
         prediction_scores = self.cls(sequence_output)
         
         if return_logits:
             return prediction_scores[:, :-1, :].contiguous()  
+
 
         lm_loss = None
         if labels is not None:
@@ -327,9 +329,37 @@ class BertLMHeadModel(BertPreTrainedModel):
         return CausalLMOutputWithCrossAttentions(
             loss=lm_loss,
             logits=prediction_scores,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-            cross_attentions=outputs.cross_attentions,
         )
+```
+
+```python
+#  对输入进行非线性变换: 投影 + 激活 + 归一化
+class BertPredictionHeadTransform(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        # 默认采用GELU激活函数
+        if isinstance(config.hidden_act, str):
+            self.transform_act_fn = ACT2FN[config.hidden_act]
+        else:
+            self.transform_act_fn = config.hidden_act
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+    def forward(self, hidden_states):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.transform_act_fn(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states)
+        return hidden_states
+
+class BertLMPredictionHead(nn.Module):
+    def __init__(self, config):
+        self.transform = BertPredictionHeadTransform(config)
+        self.decoder = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+    def forward(self, hidden_states):
+        # 1. 非线性变换
+        hidden_states = self.transform(hidden_states)
+        # 2. 解码: 将(seq_len,hidden_size)中每个word映射到词空间
+        hidden_states = self.decoder(hidden_states)
+        return hidden_states
 ```
