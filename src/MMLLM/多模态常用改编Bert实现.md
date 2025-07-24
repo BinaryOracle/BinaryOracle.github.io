@@ -5,7 +5,7 @@ category:
   - 多模态
 tag:
   - 多模态
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-07-22
 author:
@@ -279,7 +279,7 @@ BertLMHeadModel 是基于 BERT 构建的 语言建模头（Language Modeling Hea
 class BertLMHeadModel(BertPreTrainedModel):
     def __init__(self, config):
         self.bert = BertModel(config, add_pooling_layer=False)
-        self.cls = BertOnlyMLMHead(config)
+        self.cls = BertLMPredictionHead(config)
 
     def forward(
         self,
@@ -307,25 +307,23 @@ class BertLMHeadModel(BertPreTrainedModel):
         # 2. 解码
         sequence_output = outputs[0]
         prediction_scores = self.cls(sequence_output)
-        
+
+        # 3. 返回预测得分
         if return_logits:
-            return prediction_scores[:, :-1, :].contiguous()  
+            return prediction_scores[:, :-1, :].contiguous() # 返回预测出来的: [x2,x3,...,xn] , 丢掉 X(n+1)
 
-
+        # 4. 计算 next-token prediction 损失
         lm_loss = None
         if labels is not None:
-            # we are doing next-token prediction; shift prediction scores and input ids by one
+            # 4.1 模型预测出来的: [x2,x3,...,xn] , 丢掉 X(n+1) 和 标签: [x2,x3,...,xn] , 丢掉 X(1)
             shifted_prediction_scores = prediction_scores[:, :-1, :].contiguous()
             labels = labels[:, 1:].contiguous()
+            # 4.2 计算交叉熵损失
             loss_fct = CrossEntropyLoss(reduction=reduction, label_smoothing=0.1) 
             lm_loss = loss_fct(shifted_prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
             if reduction=='none':
                 lm_loss = lm_loss.view(prediction_scores.size(0),-1).sum(1)               
-
-        if not return_dict:
-            output = (prediction_scores,) + outputs[2:]
-            return ((lm_loss,) + output) if lm_loss is not None else output
-
+        
         return CausalLMOutputWithCrossAttentions(
             loss=lm_loss,
             logits=prediction_scores,
@@ -363,3 +361,4 @@ class BertLMPredictionHead(nn.Module):
         hidden_states = self.decoder(hidden_states)
         return hidden_states
 ```
+
