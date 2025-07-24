@@ -5,7 +5,7 @@ category:
   - NLP
 tag:
   - Trick
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-07-22
 order: 2
@@ -172,3 +172,191 @@ KV Cache 的引入是为了加速自回归模型的推理速度，具体体现�
 
 在首轮推理的过程中，我们传入的是 promt 提示词列表，并且 KV Cache 此时为空，还未进行初始化。因此首轮推理过程需要完成 promt 提示词列表的 keys 和 values 的缓存；由于 GPT2 由多层 GPT2Block 堆叠而成，而每一层 GPT2Block 都有一个 GPT2Attention 模块， 因此 KV Cache 需要准备好每一层 GPT2Attention 模块的 keys 和 values 缓存 (分层Cache - legacy_cache)。
 
+```python
+class GPT2Model(GPT2PreTrainedModel):
+    def forward(
+        self,
+        input_ids=None,
+        past_key_values=None, 
+        cache_position=None,
+        attention_mask=None,
+        position_ids=None,
+        head_mask=None,
+        use_cache=None,
+    ):          
+        return_legacy_cache = False
+        if use_cache:
+            # 1. 首轮推理，先进行 Legacy Cache 初始化
+            if past_key_values is None:
+                return_legacy_cache = True
+                past_key_values = DynamicCache()
+            # 2. 后续推理，将模型以元组形式返回的缓存重新封装为Legacy Cache形式
+            elif not isinstance(past_key_values, Cache):
+                return_legacy_cache = True
+                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+
+        # 3. 词嵌入 
+        inputs_embeds = self.wte(input_ids)
+        
+        # 4. 位置编码计算
+        if cache_position is None:
+            # 4.1 已经缓存的词序列长度
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            # 4.2 只为当前传入的词生成位置序列
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )    
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0) # 添加batch维度
+        # 4.3 生成位置编码
+        position_embeds = self.wpe(position_ids)
+
+        # 5. 词嵌入 + 位置编码
+        hidden_states = inputs_embeds + position_embeds.to(inputs_embeds.device)
+        
+        # 6. 进入堆叠GPT2Block模块前向传播流程
+        for i, block in enumerate(self.h):
+            
+            hidden_states = block(
+                hidden_states,
+                past_key_values if not (self.gradient_checkpointing and self.training) else None, # 训练时，不启用KV Cache
+                cache_position,
+                causal_mask,
+                use_cache=use_cache,
+            )
+
+        hidden_states = self.ln_f(hidden_states)
+        hidden_states = hidden_states.view(output_shape)
+
+        # 7. 将KV Cache用元组的形式进行返回 
+        past_key_values = past_key_values if use_cache else None
+        if return_legacy_cache:
+            past_key_values = past_key_values.to_legacy_cache()
+
+        return BaseModelOutputWithPastAndCrossAttentions(
+            last_hidden_state=hidden_states,
+            past_key_values=past_key_values,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+            cross_attentions=all_cross_attentions,
+        )
+```
+
+下图展示的是步骤7中以元组形式返回的KV Cache结构:
+
+![](KV-Cache/3.png)
+
+下面将展示GPT2Block模块的实现逻辑，由于不涉及KV Cache的实现细节，所以不过多展开:
+
+```python
+class GPT2Block(GradientCheckpointingLayer):
+
+    def forward(
+        self,
+        hidden_states: Optional[tuple[torch.FloatTensor]],
+        past_key_value: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = False,
+    ) -> Union[tuple[torch.Tensor], Optional[tuple[torch.Tensor, tuple[torch.FloatTensor, ...]]]]:
+        
+        # 1. 归一化
+        residual = hidden_states
+        hidden_states = self.ln_1(hidden_states)
+        
+        # 2. 自注意力运算
+        attn_output, self_attn_weights = self.attn(
+            hidden_states,
+            past_key_value=past_key_value,
+            cache_position=cache_position,
+            attention_mask=attention_mask,
+            use_cache=use_cache,
+        )
+        
+        # 3. residual connection
+        hidden_states = attn_output + residual
+
+        # 4. 归一化 + MLP +  residual connection
+        residual = hidden_states
+        hidden_states = self.ln_2(hidden_states)
+        feed_forward_hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + feed_forward_hidden_states
+
+        return hidden_states
+```
+
+推理时的常规流程（无 KV Cache）， 每生成一个新 token，都要：
+
+* **重新输入全部历史 token**
+
+* 对所有历史 token **重新计算 key 和 value**
+
+* 这意味着重复计算，**效率低，计算开销线性增长**
+
+---
+
+有了 KV Cache 后的改进：
+
+1. **第一次输入完整句子**，计算并缓存其 key/value；
+
+2. **后续每次生成新 token** 时：
+
+   * 只计算新 token 的 query、key、value；
+
+   * **把新 token 的 key/value 插入缓存**中（代码中用 `past_key_value.update(...)` 完成）；
+
+   * attention 直接使用「**历史缓存 key/value + 当前新 token 的 key/value**」来完成；
+
+3. 整个注意力的 query 只有一个（当前 token），**key/value 是历史缓存 + 当前 token**。
+
+```python
+class GPT2Attention(nn.Module):
+
+    def __init__(self, config, is_cross_attention=False, layer_idx=None):
+        self.c_attn = Conv1D(3 * self.embed_dim, self.embed_dim) # 输入维度: (batch,seq_len,embed_dim) , 变换后的输出维度: (batch,seq_len,3*embed_dim)
+        self.c_proj = Conv1D(self.embed_dim, self.embed_dim)
+
+    def forward(
+        self,
+        hidden_states: Optional[tuple[torch.FloatTensor]],
+        past_key_value: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+    ) -> tuple[Union[torch.Tensor, tuple[torch.Tensor]], ...]:
+        # 1. 一维卷积进行线性变换和升维，然后切分成query，key，value
+        query_states, key_states, value_states = self.c_attn(hidden_states).split(self.split_size, dim=2)
+
+        # 2. (batch,seq_len,-1,head_dim) , head_dim 是多头自注意力中每个头切分到的维度 
+        shape_q = (*query_states.shape[:-1], -1, self.head_dim)
+        shape_kv = (*key_states.shape[:-1], -1, self.head_dim)
+        
+        # 3. 维度统一: (batch,heads,seq_len,head_dim)
+        query_states = query_states.view(shape_q).transpose(1, 2)
+        key_states = key_states.view(shape_kv).transpose(1, 2)
+        value_states = value_states.view(shape_kv).transpose(1, 2)
+         
+        # 4. KV Cache 不为空 
+        if past_key_value is not None:
+            # 4.1 cache_position 记录当前词对应输入词序列中的索引
+            cache_kwargs = {"cache_position": cache_position}
+            # 4.2 将当前词的key和val进行缓存，根据所在GPTBlock层级(layer_idx说明)，和位于词序列的索引(cache_kwargs说明),插入对应层的list缓存中去，同时返回对应的key和val list
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs=cache_kwargs
+            )
+
+        # 5. 进行经典的多头自注意力运算(不展开细聊) 
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states, # 当前输入词的query
+            key_states,   # cache key list + 输入词的key
+            value_states,  # cache val list + 输入词的val
+            attention_mask, # padding mask
+            dropout=self.attn_dropout.p if self.training else 0.0,
+        )
+          
+        attn_output = attn_output.reshape(*attn_output.shape[:-2], -1).contiguous()
+        attn_output = self.c_proj(attn_output)
+        attn_output = self.resid_dropout(attn_output)
+
+        return attn_output, attn_weights
+```
