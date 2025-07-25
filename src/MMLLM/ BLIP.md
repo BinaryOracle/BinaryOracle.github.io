@@ -116,32 +116,46 @@ BLIP 使用 CapFilt 对多个大规模噪声网页图文数据集（包括 CC12M
 #### 微调阶段
 
 ```python
+# 训练函数：执行一个 epoch 的训练流程
 def train(model, data_loader, optimizer, device):
     for i, (image, caption, _) in data_loader:
-        loss = model(image, caption)      
-        
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        loss = model(image, caption)  # 前向传播，计算语言建模损失        
+        optimizer.zero_grad()         # 清除旧梯度
+        loss.backward()               # 反向传播
+        optimizer.step()              # 更新模型参数
 
+# 主流程：加载数据、初始化模型和优化器、执行多轮训练
 def main(args, config):
     #### Dataset #### 
+    # 加载 COCO Caption 数据集的训练/验证/测试划分
     train_dataset, val_dataset, test_dataset = create_dataset('caption_coco', config)  
     
-    train_loader, val_loader, test_loader = create_loader([train_dataset, val_dataset, test_dataset],samplers,
-                                                          batch_size=[config['batch_size']]*3,num_workers=[4,4,4],
-                                                          is_trains=[True, False, False], collate_fns=[None,None,None])         
+    # 构造对应的数据加载器
+    train_loader, val_loader, test_loader = create_loader(
+        [train_dataset, val_dataset, test_dataset], samplers,
+        batch_size=[config['batch_size']]*3, num_workers=[4, 4, 4],
+        is_trains=[True, False, False], collate_fns=[None, None, None]
+    )
 
     #### Model #### 
-    model = blip_decoder(pretrained=config['pretrained'], image_size=config['image_size'], vit=config['vit'], 
-                           vit_grad_ckpt=config['vit_grad_ckpt'], vit_ckpt_layer=config['vit_ckpt_layer'], 
-                           prompt=config['prompt'])
+    # 初始化 BLIP 解码器模型（用于图像字幕生成），加载预训练视觉编码器与文本解码器
+    model = blip_decoder(
+        pretrained=config['pretrained'], image_size=config['image_size'], vit=config['vit'], 
+        vit_grad_ckpt=config['vit_grad_ckpt'], vit_ckpt_layer=config['vit_ckpt_layer'], 
+        prompt=config['prompt']
+    )
     
-    optimizer = torch.optim.AdamW(params=model.parameters(), lr=config['init_lr'], weight_decay=config['weight_decay'])
+    # 初始化优化器（AdamW）
+    optimizer = torch.optim.AdamW(
+        params=model.parameters(), 
+        lr=config['init_lr'], 
+        weight_decay=config['weight_decay']
+    )
 
     #### Train ####         
-    for epoch in range(0, config['max_epoch']):     
-       train_stats = train(model, train_loader, optimizer, epoch, device)
+    for epoch in range(0, config['max_epoch']):
+        # 每个 epoch 执行一次训练
+        train_stats = train(model, train_loader, optimizer, epoch, device)
 ```
 
 ```python
@@ -177,25 +191,28 @@ class BLIP_Decoder(nn.Module):
         self.prompt_length = len(self.tokenizer(self.prompt).input_ids)-1  # 计算提示词token长度，用于后续解码时区分提示与生成文本
         
     def forward(self, image, caption):
-        
+        # 提取图像特征表示
         image_embeds = self.visual_encoder(image) 
-        image_atts = torch.ones(image_embeds.size()[:-1],dtype=torch.long).to(image.device)
-        
-        text = self.tokenizer(caption, padding='longest', truncation=True, max_length=40, return_tensors="pt").to(image.device) 
-        
-        text.input_ids[:,0] = self.tokenizer.bos_token_id
-        
+        image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image.device)
+
+        # 编码文本输入，并替换开头 token 为 [BOS]
+        text = self.tokenizer(caption, padding='longest', truncation=True, max_length=40, return_tensors="pt").to(image.device)
+        text.input_ids[:, 0] = self.tokenizer.bos_token_id
+
+        # 构建语言建模标签：屏蔽掉 padding 和 prompt 部分
         decoder_targets = text.input_ids.masked_fill(text.input_ids == self.tokenizer.pad_token_id, -100)         
-        decoder_targets[:,:self.prompt_length] = -100
-     
-        decoder_output = self.text_decoder(text.input_ids, 
-                                           attention_mask = text.attention_mask, 
-                                           encoder_hidden_states = image_embeds,
-                                           encoder_attention_mask = image_atts,                  
-                                           labels = decoder_targets,
-                                           return_dict = True,   
-                                          )   
-        loss_lm = decoder_output.loss
-        
+        decoder_targets[:, :self.prompt_length] = -100
+
+        # 调用跨模态解码器，执行语言建模训练
+        decoder_output = self.text_decoder(
+            text.input_ids,
+            attention_mask=text.attention_mask,
+            encoder_hidden_states=image_embeds,
+            encoder_attention_mask=image_atts,
+            labels=decoder_targets,
+            return_dict=True
+        )   
+
+        loss_lm = decoder_output.loss  # 提取语言建模损失
         return loss_lm
 ```
