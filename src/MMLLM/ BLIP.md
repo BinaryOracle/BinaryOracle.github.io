@@ -5,7 +5,7 @@ category:
   - 多模态
 tag:
   - 多模态
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-07-26
 author:
@@ -48,6 +48,8 @@ BLIP（Bootstrapping Language-Image Pre-training）是一个新颖的 VLP 框架
      * 过滤器（filter）剔除原始和生成的低质量描述。
    
    * 在保留信息的同时提升训练数据质量。
+
+![](blip/3.png)
 
 实验结果与表现:
 
@@ -135,6 +137,8 @@ BLIP（Bootstrapping Language-Image Pre-training）是一个新颖的 VLP 框架
 
 ### 预训练目标（ITC、ITM、LM）
 
+![](blip/1.png)
+
 BLIP 同时优化三个预训练目标，其中包括两个理解任务和一个生成任务。每对图文样本只需通过一次视觉 Transformer，但文本 Transformer 会根据不同功能分支前向三次，以计算以下三种损失：
 
 1. **Image-Text Contrastive Loss**（ITC）
@@ -164,6 +168,8 @@ BLIP 同时优化三个预训练目标，其中包括两个理解任务和一个
 
 ### CapFilt：图文数据的自举式清洗机制
 
+![](blip/2.png)
+
 由于高质量人工标注图文对（如 COCO）数量有限，而自动爬取的网页图文对（${I_{w}, T_{w}}$）噪声严重，作者提出了一个新的数据处理流程：**CapFilt**（Captioning and Filtering），用于提升图文语料的质量。
 
 CapFilt 包含两个模块，分别用于生成和过滤文本：
@@ -190,6 +196,118 @@ BLIP 在模型设计上提出了一个灵活、统一的多任务架构（MED）
 
 整体来看，BLIP 是一个兼顾理解与生成、统一建模与数据增强的多模态预训练方法，具有较强的实用性与拓展性。
 
+
+以下是对“**Experiments and Discussions**”部分翻译内容的总结，遵循您的格式规范：
+
+
+## Experiments and Discussions
+
+### 预训练细节
+
+BLIP 模型使用 PyTorch 实现，预训练环境为两个16-GPU节点。图像编码器基于在 ImageNet 上预训练的 ViT（参考 [Touvron et al., 2020](https://arxiv.org/abs/2012.12877)；[Dosovitskiy et al., 2021](https://arxiv.org/abs/2010.11929)），文本编码器则基于 BERTbase（[Devlin et al., 2019](https://arxiv.org/abs/1810.04805)）。模型变体包括 ViT-B/16 和 ViT-L/16，其中默认使用 ViT-B。
+
+训练配置如下：
+
+* 训练轮数为 20，批量大小为 2880（ViT-B）/ 2400（ViT-L）；
+
+* 优化器使用 AdamW（[Loshchilov & Hutter, 2017](https://arxiv.org/abs/1711.05101)），权重衰减为 0.05，学习率预热后分别达到 $3\times10^{-4}$（ViT-B）和 $2\times10^{-4}$（ViT-L），随后线性衰减；
+
+* 图像预训练分辨率为 $224\times224$，微调时提升为 $384\times384$。
+
+所使用的训练数据总共包含约 1400 万张图像，覆盖以下数据集：
+
+* COCO 和 Visual Genome（人工标注）；
+
+* Conceptual Captions、Conceptual 12M 和 SBU Captions（网页收集）；
+
+* 补充实验中还使用了 LAION（[Schuhmann et al., 2021](https://arxiv.org/abs/2111.02114)）的大规模网页数据集（1.15 亿图像），每轮只使用 1/5 数据。
+
+### CapFilt 效果验证
+
+![](blip/4.png)
+
+CapFilt 模块通过 Captioner 生成合成文本，再由 Filter 去除噪声文本，显著提升模型性能（表1）。三种设置下的对比表明：
+
+* 单独使用 Captioner 或 Filter 均有性能提升；
+
+* 两者联合使用时效果最佳，且具备数据量和模型规模的可扩展性；
+
+* 更强的视觉主干（如 ViT-L）可进一步增强性能。
+
+**图4** 展示了网页原始文本（$T_{w}$）与合成文本（$T_{s}$）的对比，绿色为 Filter 接收的文本，红色为剔除的文本，验证了 Captioner 提供新描述、Filter 移除无效数据的有效
+性。
+
+![](blip/5.png)
+
+### 合成文本的多样性对性能的影响
+
+![](blip/6.png)
+
+表2 比较了两种文本生成方式：
+
+* Beam search：确定性搜索，噪声比例较低（19%）；
+
+* Nucleus sampling：随机采样，噪声比例稍高（25%），但性能全面超越 Beam search。
+
+作者推测，nucleus sampling 生成的文本更具有 **新颖性与多样性**，提供更多额外信息；而 beam search 更倾向于生成数据集中常见的“安全”文本，难以提升模型泛化能力。
+
+### 编码器-解码器参数共享与解耦
+
+![](blip/7.png)
+
+表3 分析了不同的参数共享策略对模型性能的影响。结论如下：
+
+* 最佳方案是 **仅在 SA 层不共享参数**，其余部分共享；
+
+* 如果完全不共享参数，则模型体积大、性能次优；
+
+* 如果共享 SA 层，性能反而下降，因其在编码（双向注意力）与解码（因果注意力）间存在功能冲突。
+
+在 CapFilt 阶段，Captioner 与 Filter 分别进行微调。表4 显示，如果二者参数共享，则会因“确认偏差”导致性能下降 —— 生成的错误文本更难被 Filter 剔除（噪声比例仅 8%，远低于解耦时的 25%）。
+
+![](blip/8.png)
+
+
+
+以下是论文 **BLIP: Bootstrapping Language-Image Pre-training for Unified Vision-Language Understanding and Generation** 中第 **6章 Additional Ablation Study** 和第 **7章 Conclusion** 部分的翻译：
+
+## Ablation Study
+
+### CapFilt 的性能提升并非源于更长的训练时间
+
+由于经过 CapFilt 处理后的数据集包含比原始数据集更多的文本，因此在相同的 epoch 数下，训练时间会更长。为了验证 CapFilt 的有效性是否真正来自其机制本身，而非训练时间变长，我们将原始数据集中的网页文本复制，使得每个 epoch 的样本数量与 bootstrapped 数据集一致。
+
+如表 12 所示，仅通过扩充原始数据进行更长时间训练 **并未带来性能提升**，验证了 CapFilt 的真正价值。
+
+![](blip/9.png)
+
+### 应使用 Bootstrapped 数据集重新训练模型
+
+Bootstrapped 数据集应当用于**重新训练一个新模型**。我们对比了两种方式：
+
+* 在预训练模型基础上继续使用 CapFilt 数据训练；
+
+* 用 CapFilt 数据从头训练一个新模型。
+
+表 13 显示，**继续训练的效果不如重新训练**，这与知识蒸馏领域的常见做法一致：学生模型不能由教师模型直接初始化。这也间接说明 CapFilt 机制与重新初始化更契合。
+
+![](blip/10.png)
+
+## Conclusion
+
+BLIP 是一个新的视觉-语言预训练框架，在众多下游任务中都实现了**最先进（SOTA）性能**，包括理解类任务和生成类任务。
+
+BLIP 使用多模态混合的编码器-解码器模型（Multimodal Mixture of Encoder-Decoder, MED），并通过对大规模嘈杂图文数据进行 bootstrapping 构建预训练语料：**注入多样的合成描述，并剔除低质量描述**。
+
+发布了 bootstrapped 数据集，以促进视觉-语言研究的发展。
+
+未来可进一步探索以下方向以提升 BLIP 表现：
+
+* **多轮数据集 Bootstrapping**；
+
+* 为每张图像生成 **多个合成描述**，进一步扩大语料规模；
+
+* 使用多个不同的 Captioner 和 Filter 训练多个模型，再进行集成，增强 CapFilt 的效果。
 
 ## Code Implementation
 
