@@ -603,5 +603,48 @@ pos_idx = torch.eq(idx, idx_all)
 ##### 过滤阶段
 
 ```python
+class BLIP_ITM(nn.Module):
+    def __init__(self,                 
+                 med_config = 'configs/med_config.json',  
+                 image_size = 384,
+                 vit = 'base',
+                 vit_grad_ckpt = False,
+                 vit_ckpt_layer = 0,                      
+                 embed_dim = 256,     
+                 ):
+        self.visual_encoder, vision_width = create_vit(vit,image_size, vit_grad_ckpt, vit_ckpt_layer)
+        self.tokenizer = init_tokenizer()   
+        self.text_encoder = BertModel(config=med_config, add_pooling_layer=False)          
 
+        self.vision_proj = nn.Linear(vision_width, embed_dim)
+        self.text_proj = nn.Linear(text_width, embed_dim)
+
+        self.itm_head = nn.Linear(text_width, 2) 
+        
+        
+    def forward(self, image, caption, match_head='itm'):
+        image_embeds = self.visual_encoder(image) 
+        image_atts = torch.ones(image_embeds.size()[:-1],dtype=torch.long).to(image.device)        
+        
+        text = self.tokenizer(caption, padding='max_length', truncation=True, max_length=35, 
+                              return_tensors="pt").to(image.device) 
+
+        if match_head=='itm':
+            output = self.text_encoder(text.input_ids,
+                                       attention_mask = text.attention_mask,
+                                       encoder_hidden_states = image_embeds,
+                                       encoder_attention_mask = image_atts,      
+                                       return_dict = True,
+                                      )
+            itm_output = self.itm_head(output.last_hidden_state[:,0,:])     
+            return itm_output
+            
+        elif match_head=='itc':
+            text_output = self.text_encoder(text.input_ids, attention_mask = text.attention_mask,                      
+                                            return_dict = True, mode = 'text')                     
+            image_feat = F.normalize(self.vision_proj(image_embeds[:,0,:]),dim=-1)   
+            text_feat = F.normalize(self.text_proj(text_output.last_hidden_state[:,0,:]),dim=-1)    
+            
+            sim = image_feat @ text_feat.t()
+            return sim
 ```
