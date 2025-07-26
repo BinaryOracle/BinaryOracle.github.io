@@ -531,40 +531,35 @@ pos_idx = torch.eq(idx, idx_all)
                                        return_dict=True)  # last_hidden_state: (B, L, D)
 
         # 采样难负样本（是否跨 GPU）
-        if self.negative_all_rank:
-            with torch.no_grad():
-                mask = torch.eq(idx, idxs.t())  # (B, B*)
-                image_feat_world = concat_all_gather(image_feat)  # (B*, D_proj)
-                text_feat_world = concat_all_gather(text_feat)  # (B*, D_proj)
-                sim_i2t = image_feat @ text_feat_world.t() / self.temp  # (B, B*)
-                sim_t2i = text_feat @ image_feat_world.t() / self.temp  # (B, B*)
-                weights_i2t = F.softmax(sim_i2t, dim=1)
-                weights_i2t.masked_fill_(mask, 0)
-                weights_t2i = F.softmax(sim_t2i, dim=1)
-                weights_t2i.masked_fill_(mask, 0)
-
-            image_embeds_world = all_gather_with_grad(image_embeds)  # (B*, N, D)
-            image_embeds_neg = [image_embeds_world[torch.multinomial(weights_t2i[b], 1).item()] for b in range(bs)]  # list[(N, D)]
-            image_embeds_neg = torch.stack(image_embeds_neg, dim=0)  # (B, N, D)
-
-            input_ids_world = concat_all_gather(encoder_input_ids)  # (B*, L)
-            att_mask_world = concat_all_gather(text.attention_mask)  # (B*, L)
-            text_ids_neg = [input_ids_world[torch.multinomial(weights_i2t[b], 1).item()] for b in range(bs)]  # list[(L,)]
-            text_atts_neg = [att_mask_world[torch.multinomial(weights_i2t[b], 1).item()] for b in range(bs)]  # list[(L,)]
+        if self.negative_all_rank:    
+          # 跨GPU部分实现，自信看源码进行学习
         else:
-            with torch.no_grad():
+            with torch.no_grad():                
                 mask = torch.eq(idx, idx.t())
-                sim_i2t = image_feat @ text_feat.t() / self.temp
-                sim_t2i = text_feat @ image_feat.t() / self.temp
-                weights_i2t = F.softmax(sim_i2t, dim=1)
-                weights_i2t.masked_fill_(mask, 0)
-                weights_t2i = F.softmax(sim_t2i, dim=1)
-                weights_t2i.masked_fill_(mask, 0)
+                
+                sim_i2t = image_feat @ text_feat.t() / self.temp 
+                sim_t2i = text_feat @ image_feat.t() / self.temp 
 
-            image_embeds_neg = [image_embeds[torch.multinomial(weights_t2i[b], 1).item()] for b in range(bs)]  # list[(D,)]
-            image_embeds_neg = torch.stack(image_embeds_neg, dim=0)  # (B, D)
-            text_ids_neg = [encoder_input_ids[torch.multinomial(weights_i2t[b], 1).item()] for b in range(bs)]  # list[(L,)]
-            text_atts_neg = [text.attention_mask[torch.multinomial(weights_i2t[b], 1).item()] for b in range(bs)]  # list[(L,)]
+                weights_i2t = F.softmax(sim_i2t,dim=1)
+                weights_i2t.masked_fill_(mask, 0)            
+
+                weights_t2i = F.softmax(sim_t2i,dim=1)
+                weights_t2i.masked_fill_(mask, 0)     
+
+            # select a negative image (from same rank) for each text
+            image_embeds_neg = []    
+            for b in range(bs):
+                neg_idx = torch.multinomial(weights_t2i[b], 1).item()
+                image_embeds_neg.append(image_embeds[neg_idx])
+            image_embeds_neg = torch.stack(image_embeds_neg,dim=0)   
+
+            # select a negative text (from same rank) for each image    
+            text_ids_neg = []
+            text_atts_neg = []
+            for b in range(bs):
+                neg_idx = torch.multinomial(weights_i2t[b], 1).item()
+                text_ids_neg.append(encoder_input_ids[neg_idx])
+                text_atts_neg.append(text.attention_mask[neg_idx])    
         
         text_ids_neg = torch.stack(text_ids_neg, dim=0)  # (B, L)
         text_atts_neg = torch.stack(text_atts_neg, dim=0)  # (B, L)
