@@ -602,6 +602,8 @@ pos_idx = torch.eq(idx, idx_all)
 
 ##### 过滤阶段
 
+当Filter模块在Coco数据集上，采用ITC和ITM目标执行完微调后，便得到了模态对齐好的图像编码器Vit 和 文本编码器Bert ， 然后我们便可以直接用训练好的Vit和Bert来做图文匹配和图文相似度计算了。
+
 ```python
 class BLIP_ITM(nn.Module):
     def __init__(self,                 
@@ -647,4 +649,258 @@ class BLIP_ITM(nn.Module):
             
             sim = image_feat @ text_feat.t()
             return sim
+```
+
+### BLIP 预训练
+
+BLIP 模型基于 CapFilt 模块增强后的数据集上，采用ITC，ITM，LM三个目标进行训练，以下首先给出的是 BLIP 模型的训练代码:
+
+```python
+def train(model, data_loader, optimizer, epoch, device, config):
+    for i, (image, caption) in data_loader:
+        optimizer.zero_grad()
+
+        # ramp up alpha in the first 2 epochs
+        alpha = config['alpha']*min(1,(epoch*len(data_loader)+i)/(2*len(data_loader))) 
+
+        loss_ita, loss_itm, loss_lm = model(image, caption, alpha = alpha)  
+        loss = loss_ita + loss_itm + loss_lm  
+
+        loss.backward()
+        optimizer.step()
+
+def main(args, config):
+    #### Dataset ####
+    datasets = [create_dataset('pretrain', config, min_scale=0.2)] # 返回的caption前不添加prompt
+
+    data_loader = create_loader(datasets,samplers,batch_size=[config['batch_size']], num_workers=[4], is_trains=[True], collate_fns=[None])[0]      
+
+    #### Model ####
+    model = blip_pretrain(image_size=config['image_size'], vit=config['vit'], vit_grad_ckpt=config['vit_grad_ckpt'], 
+                            vit_ckpt_layer=config['vit_ckpt_layer'], queue_size=config['queue_size'])
+    optimizer = torch.optim.AdamW(params=model.parameters(), lr=config['init_lr'], weight_decay=config['weight_decay'])
+
+    for epoch in range(start_epoch, config['max_epoch']):
+        train(model, data_loader, optimizer, epoch, device, config)
+```
+
+BLIP 预训练代码实现部分参考Moco论文实现，采用动量慢更新策略，整体流程和ALBEF模型实现一致，下面首先给出的是 BLIP 模型的 init 初始化方法:
+
+```python
+class BLIP_Pretrain(nn.Module):
+    def __init__(self,                 
+                 med_config='configs/bert_config.json',   # 文本编码器配置
+                 image_size=224,                          # 输入图像大小
+                 vit='base',                              # 使用的 ViT 模型类型（如 base、large）
+                 vit_grad_ckpt=False,                     # 是否使用梯度检查点（节省显存）
+                 vit_ckpt_layer=0,                        # 从第几层开始启用 checkpoint
+                 embed_dim=256,                           # 图文共享表示的嵌入维度
+                 queue_size=57600,                        # 对比学习中图文特征队列长度
+                 momentum=0.995,                          # 动量编码器的更新参数
+                 ):
+        super().__init__()
+
+        # 1. 创建主视觉编码器（ViT）
+        self.visual_encoder, vision_width = create_vit(
+            vit, image_size, vit_grad_ckpt, vit_ckpt_layer, 0
+        )
+
+        # 2. 创建文本编码器（BERT）
+        self.tokenizer = init_tokenizer()  # 加载 tokenizer（默认 BERT）
+        self.text_encoder = BertModel.from_pretrained(
+            'bert-base-uncased',
+            config=encoder_config,
+            add_pooling_layer=False
+        )
+
+        # 3. 视觉 / 文本 特征映射到共享空间
+        self.vision_proj = nn.Linear(vision_width, embed_dim)  # (D_v → D_e)
+        self.text_proj = nn.Linear(text_width, embed_dim)      # (D_t → D_e)
+
+        # 4. 图文匹配（ITM）任务的二分类头
+        self.itm_head = nn.Linear(text_width, 2)
+
+        # ======================= 动量编码器（Momentum Encoder） ======================= #
+        # 用于构造 InfoNCE 的 soft target，与主模型参数不同步，而是 EMA 滑动平均更新
+
+        self.visual_encoder_m, _ = create_vit(vit, image_size)  # 动量视觉编码器
+        self.vision_proj_m = nn.Linear(vision_width, embed_dim)
+
+        self.text_encoder_m = BertModel(
+            config=encoder_config,
+            add_pooling_layer=False
+        )  # 动量文本编码器
+        self.text_proj_m = nn.Linear(text_width, embed_dim)
+
+        # 将主模型和动量模型参数组织成配对，用于拷贝和更新
+        self.model_pairs = [
+            [self.visual_encoder, self.visual_encoder_m],
+            [self.vision_proj, self.vision_proj_m],
+            [self.text_encoder, self.text_encoder_m],
+            [self.text_proj, self.text_proj_m],
+        ]
+        self.copy_params()  # 初始化时直接复制参数（后续 EMA 更新）
+
+        # ======================= 特征队列初始化 ======================= #
+        # 队列用于 InfoNCE 对比学习中的负样本缓存（增强样本多样性）
+
+        self.register_buffer("image_queue", torch.randn(embed_dim, queue_size))  # 图像队列：(D_e, Q)
+        self.register_buffer("text_queue", torch.randn(embed_dim, queue_size))   # 文本队列：(D_e, Q)
+        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))      # 队列指针（循环更新）
+
+        # 初始化队列为单位向量（便于计算归一化相似度）
+        self.image_queue = nn.functional.normalize(self.image_queue, dim=0)
+        self.text_queue = nn.functional.normalize(self.text_queue, dim=0)
+
+        self.queue_size = queue_size
+        self.momentum = momentum
+
+        # InfoNCE 温度参数（可学习）
+        self.temp = nn.Parameter(0.07 * torch.ones([]))
+
+        # ======================= 文本解码器（用于 LM 任务） ======================= #
+        self.text_decoder = BertLMHeadModel.from_pretrained(
+            'bert-base-uncased',
+            config=decoder_config
+        )
+```
+
+BLIP 模型的前向传播流程和ALBEF实现基本一致，这里不过多进行展开:
+
+```python
+def forward(self, image, caption, alpha):
+    # ===================== 1. 图像与文本特征提取 ===================== #
+    
+    # 图像编码：提取视觉特征
+    image_embeds = self.visual_encoder(image)         # (B, N, D_v)
+    image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image.device)  # (B, N)
+    image_feat = F.normalize(self.vision_proj(image_embeds[:, 0, :]), dim=-1)  # (B, D_e)，CLS特征 → 投影 → 归一化
+    
+    # 文本编码：tokenize 文本
+    text = self.tokenizer(caption, padding='max_length', truncation=True, max_length=30, return_tensors="pt").to(image.device)  
+    text_output = self.text_encoder(text.input_ids, attention_mask=text.attention_mask, return_dict=True, mode='text')  
+    text_feat = F.normalize(self.text_proj(text_output.last_hidden_state[:, 0, :]), dim=-1)  # (B, D_e)，CLS特征 → 投影 → 归一化
+
+    # ===================== 2. 计算动量编码器输出，用于生成 soft target ===================== #
+
+    with torch.no_grad():
+        self._momentum_update()
+
+        # 图像动量编码器
+        image_embeds_m = self.visual_encoder_m(image)                          # (B, N, D_v)
+        image_feat_m = F.normalize(self.vision_proj_m(image_embeds_m[:, 0, :]), dim=-1)  # (B, D_e)
+
+        # 构建图像所有对比特征 = 当前batch + 队列
+        image_feat_all = torch.cat([image_feat_m.T, self.image_queue.clone().detach()], dim=1)  # (D_e, B+Q)
+
+        # 文本动量编码器
+        text_output_m = self.text_encoder_m(text.input_ids, attention_mask=text.attention_mask, return_dict=True, mode='text')
+        text_feat_m = F.normalize(self.text_proj_m(text_output_m.last_hidden_state[:, 0, :]), dim=-1)  # (B, D_e)
+
+        # 构建文本所有对比特征 = 当前batch + 队列
+        text_feat_all = torch.cat([text_feat_m.T, self.text_queue.clone().detach()], dim=1)  # (D_e, B+Q)
+
+        # 计算图 → 文本 和 文本 → 图 相似度（soft target）
+        sim_i2t_m = image_feat_m @ text_feat_all / self.temp       # (B, B+Q)
+        sim_t2i_m = text_feat_m @ image_feat_all / self.temp       # (B, B+Q)
+
+        sim_targets = torch.zeros(sim_i2t_m.size()).to(image.device)
+        sim_targets.fill_diagonal_(1)  # 构造 hard target (对角线为正例)
+
+        sim_i2t_targets = alpha * F.softmax(sim_i2t_m, dim=1) + (1 - alpha) * sim_targets  # 软标签 + 硬标签混合
+        sim_t2i_targets = alpha * F.softmax(sim_t2i_m, dim=1) + (1 - alpha) * sim_targets
+
+    # ===================== 3. 计算 InfoNCE 对比学习损失 (ITC) ===================== #
+
+    sim_i2t = image_feat @ text_feat_all / self.temp     # (B, B+Q)
+    sim_t2i = text_feat @ image_feat_all / self.temp     # (B, B+Q)
+
+    loss_i2t = -torch.sum(F.log_softmax(sim_i2t, dim=1) * sim_i2t_targets, dim=1).mean()
+    loss_t2i = -torch.sum(F.log_softmax(sim_t2i, dim=1) * sim_t2i_targets, dim=1).mean()
+    loss_ita = (loss_i2t + loss_t2i) / 2
+
+    # 更新负样本队列
+    self._dequeue_and_enqueue(image_feat_m, text_feat_m)
+
+    # ===================== 4. 图文匹配 (ITM) ===================== #
+
+    # 用于多模态 cross-attention 编码的输入文本（替换 CLS）
+    encoder_input_ids = text.input_ids.clone()
+    encoder_input_ids[:, 0] = self.tokenizer.enc_token_id
+
+    bs = image.size(0)
+
+    # 正样本对
+    output_pos = self.text_encoder(encoder_input_ids,
+                                   attention_mask=text.attention_mask,
+                                   encoder_hidden_states=image_embeds,
+                                   encoder_attention_mask=image_atts,
+                                   return_dict=True)
+    
+    with torch.no_grad():
+        # 为 ITM 任务采样负样本索引（从 sim 分布中采样，避免选到自己）
+        weights_t2i = F.softmax(sim_t2i[:, :bs], dim=1) + 1e-4
+        weights_t2i.fill_diagonal_(0)
+        weights_i2t = F.softmax(sim_i2t[:, :bs], dim=1) + 1e-4
+        weights_i2t.fill_diagonal_(0)
+
+    # select a negative image for each text
+    image_embeds_neg = []
+    for b in range(bs):
+      neg_idx = torch.multinomial(weights_t2i[b], 1).item()
+      image_embeds_neg.append(image_embeds[neg_idx])
+      image_embeds_neg = torch.stack(image_embeds_neg,dim=0)
+
+    # select a negative text for each image
+    text_ids_neg = []
+    text_atts_neg = []
+    for b in range(bs):
+      neg_idx = torch.multinomial(weights_i2t[b], 1).item()
+      text_ids_neg.append(encoder_input_ids[neg_idx])
+      text_atts_neg.append(text.attention_mask[neg_idx])
+
+    text_ids_neg = torch.stack(text_ids_neg,dim=0)
+    text_atts_neg = torch.stack(text_atts_neg,dim=0)
+
+    # 合并正负样本对
+    text_ids_all = torch.cat([encoder_input_ids, text_ids_neg], dim=0)   # (2B, L)
+    text_atts_all = torch.cat([text.attention_mask, text_atts_neg], dim=0)  # (2B, L)
+    image_embeds_all = torch.cat([image_embeds_neg, image_embeds], dim=0)  # (2B, N, D_v)
+    image_atts_all = torch.cat([image_atts, image_atts], dim=0)           # (2B, N)
+
+    output_neg = self.text_encoder(text_ids_all,
+                                   attention_mask=text_atts_all,
+                                   encoder_hidden_states=image_embeds_all,
+                                   encoder_attention_mask=image_atts_all,
+                                   return_dict=True)
+
+    # 提取 [CLS] 融合特征，用于二分类匹配
+    vl_embeddings = torch.cat([output_pos.last_hidden_state[:, 0, :],
+                               output_neg.last_hidden_state[:, 0, :]], dim=0)  # (3B, D_t)
+    vl_output = self.itm_head(vl_embeddings)  # (3B, 2)，匹配or不匹配
+
+    itm_labels = torch.cat([
+        torch.ones(bs, dtype=torch.long),
+        torch.zeros(2 * bs, dtype=torch.long)
+    ], dim=0).to(image.device)
+
+    loss_itm = F.cross_entropy(vl_output, itm_labels)
+
+    # ===================== 5. 文本生成任务（LM） ===================== #
+
+    decoder_input_ids = text.input_ids.clone()
+    decoder_input_ids[:, 0] = self.tokenizer.bos_token_id  # 用 [BOS] 替换 [CLS]
+    decoder_targets = decoder_input_ids.masked_fill(decoder_input_ids == self.tokenizer.pad_token_id, -100)  # 忽略pad位loss
+
+    decoder_output = self.text_decoder(decoder_input_ids,
+                                       attention_mask=text.attention_mask,
+                                       encoder_hidden_states=image_embeds,
+                                       encoder_attention_mask=image_atts,
+                                       labels=decoder_targets,
+                                       return_dict=True)
+
+    loss_lm = decoder_output.loss
+
+    # ===================== 6. 返回三个 loss ===================== #
+    return loss_ita, loss_itm, loss_lm
 ```
