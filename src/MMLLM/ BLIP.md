@@ -447,7 +447,7 @@ class BLIP_Retrieval(nn.Module):
         text_feat = F.normalize(self.text_proj(text_output.last_hidden_state[:, 0, :]), dim=-1)  # 只取CLS Token做投影: (B, D_proj)
 ```
 
-2. 
+2. 构造图文匹配矩阵 (Target)
 
 ```python
         # 构造图文匹配矩阵
@@ -456,7 +456,28 @@ class BLIP_Retrieval(nn.Module):
         pos_idx = torch.eq(idx, idx_all).float()  # (B, B + Q)
         sim_targets = pos_idx / pos_idx.sum(1, keepdim=True)  # (B, B + Q)
 ```
+这里需要和 MoCo 论文实现进行区分，MoCo 中采用的是每个 query（图像）只对应一个 positive（key），因此正负样本是 one-hot 编码，contrastive loss 是严格的一对一；而在 BLIP 中，由于图文对来自自然语言描述，可能存在多个正样本（即同一个图像可以有多个 caption），而且动量队列可能重复包含同一个样本（multi-hot），因此这里构造 `sim_targets` 时不是用 one-hot，而是通过 `pos_idx` 判断当前图文对与队列中哪些样本是正对（`idx` 相等），然后用行归一化将多个正样本平均分配权重，形成 soft target 分布，从而使对比学习更加稳健。
 
+举例:
+
+```python
+# 1. 环境
+idx = [[7], [13], [20]]  # B=3
+idx_queue = [1, 7, 5, 13, 9, 30]  # Q=6
+idx_all = [7, 13, 20, 1, 7, 5, 13, 9, 30]  # shape: (1, 9)
+
+# 2. 构造图文匹配矩阵
+pos_idx = torch.eq(idx, idx_all)
+# 第1行: [1, 0, 0, 0, 1, 0, 0, 0, 0]
+# 第2行: [0, 1, 0, 0, 0, 0, 1, 0, 0]
+# 第3行: [0, 0, 1, 0, 0, 0, 0, 0, 0]
+
+# 3. 进行归一化
+# 第1行: [0.5, 0, 0, 0, 0.5, 0, 0, 0, 0]
+# 第2行: [0, 0.5, 0, 0, 0, 0, 0.5, 0, 0]
+# 第3行: [0, 0, 1.0, 0, 0, 0, 0, 0, 0]
+```
+3.  动量慢更新 + 软标签计算
 
 ```python
        # 使用动量编码器获取特征
@@ -466,16 +487,19 @@ class BLIP_Retrieval(nn.Module):
             image_feat_m = F.normalize(self.vision_proj_m(image_embeds_m[:, 0, :]), dim=-1)  # (B, D_proj)
             image_feat_m_all = torch.cat([image_feat_m.t(), self.image_queue.clone().detach()], dim=1)  # (D_proj, B + Q)
 
-            text_output_m = self.text_encoder_m(text.input_ids, attention_mask=text.attention_mask,
-                                                return_dict=True, mode='text')
+            text_output_m = self.text_encoder_m(text.input_ids, attention_mask=text.attention_mask,return_dict=True, mode='text')
             text_feat_m = F.normalize(self.text_proj_m(text_output_m.last_hidden_state[:, 0, :]), dim=-1)  # (B, D_proj)
             text_feat_m_all = torch.cat([text_feat_m.t(), self.text_queue.clone().detach()], dim=1)  # (D_proj, B + Q)
-
+            
             sim_i2t_m = image_feat_m @ text_feat_m_all / self.temp  # (B, B + Q)
             sim_t2i_m = text_feat_m @ image_feat_m_all / self.temp  # (B, B + Q)
             sim_i2t_targets = alpha * F.softmax(sim_i2t_m, dim=1) + (1 - alpha) * sim_targets  # (B, B + Q)
             sim_t2i_targets = alpha * F.softmax(sim_t2i_m, dim=1) + (1 - alpha) * sim_targets  # (B, B + Q)
+```
 
+4.  计算ITC损失 + 更新动量队列
+
+```python
         # 当前 batch 与动量队列的相似度
         sim_i2t = image_feat @ text_feat_m_all / self.temp  # (B, B + Q)
         sim_t2i = text_feat @ image_feat_m_all / self.temp  # (B, B + Q)
@@ -488,8 +512,12 @@ class BLIP_Retrieval(nn.Module):
         # 更新队列
         idxs = concat_all_gather(idx)  # (B*, 1)
         self._dequeue_and_enqueue(image_feat_m, text_feat_m, idxs)
+```
 
-        ### 图文匹配任务 (ITM) ###
+5. 
+
+```python
+   ### 图文匹配任务 (ITM) ###
 
         encoder_input_ids = text.input_ids.clone()  # (B, L)
         encoder_input_ids[:, 0] = self.tokenizer.enc_token_id
@@ -560,6 +588,12 @@ class BLIP_Retrieval(nn.Module):
 
         return loss_ita, loss_itm
 ```
+
+> `idx` 是当前 `GPU` 上 本地批次（batch）的样本索引（`shape: (B, 1)`）。
+
+> `idxs` 是通过 `concat_all_gather(idx)` 得到的 所有 `GPU` 上所有样本索引的集合（`shape: (total_batch_size, 1)`）。
+
+
 
 ##### 过滤阶段
 
