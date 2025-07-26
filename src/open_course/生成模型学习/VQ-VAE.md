@@ -2,9 +2,9 @@
 title: VQ-VAE 论文
 icon: file
 category:
-  - 多模态
+  - 生成模型
 tag:
-  - 多模态
+  - 生成模型
   - 编辑中
 footer: 技术共建，知识共享
 date: 2025-07-27
