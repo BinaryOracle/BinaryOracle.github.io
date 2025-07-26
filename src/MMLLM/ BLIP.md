@@ -514,7 +514,7 @@ pos_idx = torch.eq(idx, idx_all)
         self._dequeue_and_enqueue(image_feat_m, text_feat_m, idxs)
 ```
 
-5. 
+5. 正样本编码 + 难负样本采样
 
 ```python
    ### 图文匹配任务 (ITM) ###
@@ -530,7 +530,7 @@ pos_idx = torch.eq(idx, idx_all)
                                        encoder_attention_mask=image_atts,
                                        return_dict=True)  # last_hidden_state: (B, L, D)
 
-        # 采样负样本（是否跨 GPU）
+        # 采样难负样本（是否跨 GPU）
         if self.negative_all_rank:
             with torch.no_grad():
                 mask = torch.eq(idx, idxs.t())  # (B, B*)
@@ -561,25 +561,41 @@ pos_idx = torch.eq(idx, idx_all)
                 weights_t2i = F.softmax(sim_t2i, dim=1)
                 weights_t2i.masked_fill_(mask, 0)
 
-            image_embeds_neg = [image_embeds[torch.multinomial(weights_t2i[b], 1).item()] for b in range(bs)]  # list[(N, D)]
-            image_embeds_neg = torch.stack(image_embeds_neg, dim=0)  # (B, N, D)
+            image_embeds_neg = [image_embeds[torch.multinomial(weights_t2i[b], 1).item()] for b in range(bs)]  # list[(D,)]
+            image_embeds_neg = torch.stack(image_embeds_neg, dim=0)  # (B, D)
             text_ids_neg = [encoder_input_ids[torch.multinomial(weights_i2t[b], 1).item()] for b in range(bs)]  # list[(L,)]
             text_atts_neg = [text.attention_mask[torch.multinomial(weights_i2t[b], 1).item()] for b in range(bs)]  # list[(L,)]
-
+        
         text_ids_neg = torch.stack(text_ids_neg, dim=0)  # (B, L)
         text_atts_neg = torch.stack(text_atts_neg, dim=0)  # (B, L)
+```
 
+> `idx` 是当前 `GPU` 上 本地批次（batch）的样本索引（`shape: (B, 1)`）。
+
+> `idxs` 是通过 `concat_all_gather(idx)` 得到的 所有 `GPU` 上所有样本索引的集合（`shape: (total_batch_size, 1)`）。
+
+
+6. 构造两组负样本
+
+```python
+        # [正样本，负样本]
         text_ids_all = torch.cat([encoder_input_ids, text_ids_neg], dim=0)  # (2B, L)
         text_atts_all = torch.cat([text.attention_mask, text_atts_neg], dim=0)  # (2B, L)
+        # [负样本，正样本]
         image_embeds_all = torch.cat([image_embeds_neg, image_embeds], dim=0)  # (2B, N, D)
         image_atts_all = torch.cat([image_atts, image_atts], dim=0)  # (2B, N)
 
+        # 两组负样本编码
         output_neg = self.text_encoder(text_ids_all,
                                        attention_mask=text_atts_all,
                                        encoder_hidden_states=image_embeds_all,
                                        encoder_attention_mask=image_atts_all,
                                        return_dict=True)
+```
 
+7. 计算ITM损失 + 返回ITC损失和ITM损失
+
+```python
         # ITM 分类损失
         vl_embeddings = torch.cat([output_pos.last_hidden_state[:, 0, :], output_neg.last_hidden_state[:, 0, :]], dim=0)  # (3B, D)
         vl_output = self.itm_head(vl_embeddings)  # (3B, 2)
@@ -588,12 +604,6 @@ pos_idx = torch.eq(idx, idx_all)
 
         return loss_ita, loss_itm
 ```
-
-> `idx` 是当前 `GPU` 上 本地批次（batch）的样本索引（`shape: (B, 1)`）。
-
-> `idxs` 是通过 `concat_all_gather(idx)` 得到的 所有 `GPU` 上所有样本索引的集合（`shape: (total_batch_size, 1)`）。
-
-
 
 ##### 过滤阶段
 
