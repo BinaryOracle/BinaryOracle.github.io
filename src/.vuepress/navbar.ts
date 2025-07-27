@@ -5,7 +5,7 @@ export default navbar([
   "/LLM/",
   "/MMLLM/",
   "/3DVL/",
-   "/open_course/",
+   "/other_direction/",
  "/open_projects/",
  "/other/",
 ]);

@@ -1,5 +1,5 @@
 ---
-title: 课程笔记
+title: 其他方向
 index: false
 icon: computer
 article: false
