@@ -584,4 +584,4 @@ $$
 
 ## 推荐阅读
 
-![Introduction: Variational Auto - Encoder](https://adaning.github.io/posts/53598.html)
+[Introduction: Variational Auto - Encoder](https://adaning.github.io/posts/53598.html)
