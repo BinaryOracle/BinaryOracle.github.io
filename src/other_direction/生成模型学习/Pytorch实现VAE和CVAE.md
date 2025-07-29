@@ -387,3 +387,4 @@ with torch.no_grad():
         axs[i].axis('off')
     plt.show()
 ```
+![](PVAE/4.png)
