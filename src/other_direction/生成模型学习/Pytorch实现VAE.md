@@ -135,6 +135,86 @@ def vae_loss(recon_x, x, mu, logvar):
     return BCE + KLD
 ```
 
+变分自编码器（VAE）训练的核心目标函数，等式右边的两项是:
+
+$$
+\log P(X) - D_{KL}[Q(z|X) \| P(z|X)] = \mathbb{E}_{z \sim Q(z|X)} [\log P(X|z)] - D_{KL}[Q(z|X) \| P(z)]
+$$
+
+这就是我们在优化的 **变分下界（ELBO）**，即最大化：
+
+$$
+\mathcal{L}_{\text{VAE}} = \mathbb{E}_{z \sim Q(z|X)} [\log P(X|z)] - D_{KL}[Q(z|X) \| P(z)]
+$$
+
+第一项：重建对数似然 $\log P(X|z)$ , 这项衡量的是：**给定隐变量 z，重建样本 X 的能力**。在实际中要通过具体分布建模 `P(X|z)`，并写出其对数形式。
+
+**我们假设图像每个像素的值是伯努利分布，并且相互独立**。
+
+> Step 1：伯努利分布的概率密度函数
+
+对于一个二元变量 $x_i \in \{0, 1\}$，其伯努利分布定义为：
+
+$$
+P(x_i \mid \hat{x}_i) = \hat{x}_i^{x_i} (1 - \hat{x}_i)^{1 - x_i}
+$$
+
+其中：
+
+* $\hat{x}_i \in (0, 1)$：为预测像素点为 1 的概率（即 decoder 输出）
+
+* $x_i \in \{0, 1\}$：为真实像素值
+
+> Step 2：图像整体建模为像素独立
+
+我们假设图像共有 $D = 784$ 个像素点，每个像素点是独立的伯努利分布，所以整个图像的条件概率为：
+
+$$
+P(X \mid z) = \prod_{i=1}^{D} P(x_i \mid \hat{x}_i) = \prod_{i=1}^{D} \hat{x}_i^{x_i} (1 - \hat{x}_i)^{1 - x_i}
+$$
+
+> Step 3：取对数得到 log-likelihood
+
+对上式取对数：
+
+$$
+\log P(X \mid z) = \sum_{i=1}^{D} \left[ x_i \log \hat{x}_i + (1 - x_i) \log (1 - \hat{x}_i) \right]
+$$
+
+这就是我们在 VAE 中用于训练的 **重建项**！
+
+> Step 4：对应到 Binary Cross Entropy（BCE）
+
+这正是 **binary cross entropy loss** 的形式（取负号）：
+
+$$
+\text{BCE}(X, \hat{X}) = - \sum_{i=1}^{D} \left[ x_i \log \hat{x}_i + (1 - x_i) \log (1 - \hat{x}_i) \right]
+$$
+
+在 PyTorch 中：
+
+```python
+F.binary_cross_entropy(recon_x, x, reduction='sum')  # 就是 -log P(X|z)
+```
+
+---
+
+第二项：KL 散度项
+
+$$
+D_{KL}[Q(z|X) \| P(z)]
+$$
+
+衡量的是：我们学习的编码器 `Q(z|X)` 与先验 `P(z)`（通常为标准正态分布 $\mathcal{N}(0, I)$）之间的距离。
+
+对于高斯分布，它有一个闭式解：
+
+$$
+D_{KL} = -\frac{1}{2} \sum_{j=1}^d (1 + \log \sigma_j^2 - \mu_j^2 - \sigma_j^2)
+$$
+
+
+
 ## 4. 数据加载
 
 ```python
