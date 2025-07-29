@@ -1,5 +1,5 @@
 ---
-title: Pytorch 实现 VAE
+title: Pytorch 实现 VAE 和 CVAE
 icon: file
 category:
   - 生成模型
@@ -12,12 +12,13 @@ author:
   - BinaryOracle
 ---
 
-`本文将使用 PyTorch 实现变分自编码器（VAE），并在 MNIST 数据集上进行训练与评估` 
+`本文将使用 PyTorch 实现变分自编码器（VAE）和 条件变分自编码器(CVAE)，并在 MNIST 数据集上进行训练与评估` 
 
 <!-- more -->
 
+## 实现VAE
 
-## 1. 安装和导入依赖
+### 1. 安装和导入依赖
 
 ```python
 import torch
@@ -29,7 +30,7 @@ from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 ```
 
-## 2. 定义 VAE 模型
+### 2. 定义 VAE 模型
 
 ![](PVAE/1.png)
 
@@ -126,7 +127,7 @@ $$
 $$
 
 
-## 3. 定义损失函数（重构损失 + KL散度）
+### 3. 定义损失函数（重构损失 + KL散度）
 
 ```python
 def vae_loss(recon_x, x, mu, logvar):
@@ -213,9 +214,7 @@ $$
 D_{KL} = -\frac{1}{2} \sum_{j=1}^d (1 + \log \sigma_j^2 - \mu_j^2 - \sigma_j^2)
 $$
 
-
-
-## 4. 数据加载
+### 4. 数据加载
 
 ```python
 transform = transforms.ToTensor()
@@ -224,7 +223,7 @@ train_dataset = datasets.MNIST(root='./data', train=True, transform=transform, d
 train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
 ```
 
-## 5. 训练模型
+### 5. 训练模型
 
 ```python
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -247,7 +246,7 @@ for epoch in range(epochs):
     print(f"Epoch {epoch+1}, Loss: {train_loss / len(train_loader.dataset):.4f}")
 ```
 
-## 6. 模型评估
+### 6. 模型评估
 
 ```python
 model.eval()
@@ -270,3 +269,121 @@ with torch.no_grad():
 ```
 
 ![](PVAE/2.png)
+
+
+**我们还可以从标准正态分布中采样一个向量 `z ~ N(0, I)`，然后送入 VAE 的 `decode()` 方法，生成图像**。这是变分自编码器（VAE）最重要的能力之一：**生成样本**。
+
+VAE 的设计初衷之一就是在潜在空间中学习一个接近于标准正态分布 $\mathcal{N}(0, I)$ 的分布。训练中，VAE 通过加入 KL 散度项让 `q(z|x)` 接近于标准正态分布。因此，**在推理阶段可以从 $\mathcal{N}(0, I)$ 中采样 z**，并使用 `decode(z)` 生成新的图像。
+
+你可以在训练完成后加入如下代码来生成图像：
+
+```python
+with torch.no_grad():
+    # 从标准正态分布中采样 8 个 z 向量
+    z = torch.randn(8, 20).to(device)  # 20 是 latent_dim 的大小
+    generated = model.decode(z).view(-1, 1, 28, 28).cpu()
+
+    # 可视化生成图像
+    fig, axs = plt.subplots(1, 8, figsize=(15, 2))
+    for i in range(8):
+        axs[i].imshow(generated[i].squeeze(), cmap='gray')
+        axs[i].axis('off')
+    plt.suptitle("Generated Images from z ~ N(0, I)")
+    plt.show()
+```
+> epoch 改为 100 个后的生成样本效果:
+
+![](PVAE/3.png)
+
+## CVAE 实现
+
+条件变分自编码器（**CVAE**）是 VAE 的一个变种，它引入了**条件变量** $c$，以实现对生成样本的控制。比如在 MNIST 中，c 可以是类别标签（0-9），使得模型能够**生成指定数字**的图像。
+
+CVAE 模型中的每一步都变成 **条件化**：
+
+| 部分    | 普通 VAE | CVAE 版本  |   
+| ----- | ------ | -------- | 
+| 编码器输入 | $x$    | $[x, c]$ |            
+| 解码器输入 | $z$    | $[z, c]$ |        
+| 输出    | $x'$   |  $x'$ |
+
+> 没有给出的步骤，均和VAE实现部分保持一致。
+
+### 2. 定义 CVAE 模型
+
+```python
+class CVAE(nn.Module):
+    def __init__(self, input_dim=784, label_dim=10, hidden_dim=400, latent_dim=20):
+        super(CVAE, self).__init__()
+        self.input_dim = input_dim
+        self.label_dim = label_dim
+
+        # 编码器：x 和 标签 c 连接
+        self.fc1 = nn.Linear(input_dim + label_dim, hidden_dim)
+        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+
+        # 解码器：z 和 标签 c 连接
+        self.fc2 = nn.Linear(latent_dim + label_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, input_dim)
+
+    def encode(self, x, c):
+        xc = torch.cat([x, c], dim=1)  # concat image and condition
+        h = F.relu(self.fc1(xc))
+        return self.fc_mu(h), self.fc_logvar(h)
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def decode(self, z, c):
+        zc = torch.cat([z, c], dim=1)
+        h = F.relu(self.fc2(zc))
+        return torch.sigmoid(self.fc3(h))
+
+    def forward(self, x, c):
+        mu, logvar = self.encode(x, c)
+        z = self.reparameterize(mu, logvar)
+        return self.decode(z, c), mu, logvar
+```
+
+### 5. 训练过程
+
+```python
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = CVAE().to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+for epoch in range(10):
+    model.train()
+    train_loss = 0
+    for x, y in train_loader:
+        x = x.view(-1, 784).to(device)
+        c = F.one_hot(y, num_classes=10).float().to(device)
+
+        optimizer.zero_grad()
+        recon_x, mu, logvar = model(x, c)
+        loss = loss_function(recon_x, x, mu, logvar)
+        loss.backward()
+        train_loss += loss.item()
+        optimizer.step()
+    print(f"Epoch {epoch+1}, Loss: {train_loss / len(train_loader.dataset):.4f}")
+```
+
+###  6. 条件生成图像（指定标签）
+
+```python
+model.eval()
+with torch.no_grad():
+    z = torch.randn(10, 20).to(device)
+    labels = torch.arange(0, 10).long()
+    c = F.one_hot(labels, num_classes=10).float().to(device)
+    gen_imgs = model.decode(z, c).view(-1, 1, 28, 28).cpu()
+
+    fig, axs = plt.subplots(1, 10, figsize=(15, 2))
+    for i in range(10):
+        axs[i].imshow(gen_imgs[i].squeeze(), cmap='gray')
+        axs[i].axis('off')
+    plt.show()
+```
