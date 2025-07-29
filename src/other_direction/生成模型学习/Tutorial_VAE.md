@@ -581,3 +581,7 @@ $$
 该模型的结构如图6所示。测试时，我们只需从 $z \sim \mathcal{N}(0,I)$ 采样，即可得到 $P(Y|X)$ 的样本。
 
 ![](TVAE/5.png)
+
+## 推荐阅读
+
+![Introduction: Variational Auto - Encoder](https://adaning.github.io/posts/53598.html)
