@@ -1,5 +1,5 @@
 ---
-title: VQ-VAE 论文
+title: Pytorch 实现 VQ-VAE
 icon: file
 category:
   - 生成模型
@@ -12,8 +12,8 @@ author:
   - BinaryOracle
 ---
 
-`Neural Discrete Representation Learning 论文简析` 
+`本文将使用 PyTorch 实现 VQ-VAE 模型` 
 
 <!-- more -->
 
-> 论文链接: [Neural Discrete Representation Learning](https://arxiv.org/abs/1711.00937)
+
