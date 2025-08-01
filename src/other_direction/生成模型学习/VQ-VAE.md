@@ -395,7 +395,7 @@ for epoch in range(num_epochs):
     total_vq_loss = 0
     for x, _ in train_loader:
         x = x.to(device)
-        x_recon, vq_loss = model(x)
+        x_recon, vq_loss, _ = model(x)
         recon_loss = F.mse_loss(x_recon, x)
         loss = recon_loss + vq_loss
 
@@ -495,6 +495,7 @@ for epoch in range(10):
 
     print(f"[PixelCNN] Epoch {epoch+1} Loss: {total_loss:.4f}")
 ```
+> PixelCNN 学习的是 latent index 的分布
 
 PixelCNN 生成 latent 索引 → VQ-VAE 解码成图像
 
