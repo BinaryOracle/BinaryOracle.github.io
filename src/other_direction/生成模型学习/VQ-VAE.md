@@ -283,10 +283,11 @@ class VectorQuantizer(nn.Module):
 
         # straight-through estimator
         quantized = z + (quantized - z).detach()
-
-        return quantized, loss
+        
+        encoding_indices = encoding_indices.view(z_perm.shape[0], z_perm.shape[1], z_perm.shape[2])  # [B, H, W]
+        
+        return quantized, loss, encoding_indices
 ```
-
 
 ---
 
@@ -357,9 +358,9 @@ class VQVAE(nn.Module):
 
     def forward(self, x):
         z = self.encoder(x)
-        quantized, vq_loss = self.vq(z)
+        quantized, vq_loss, encoding_indices = self.vq(z)
         x_recon = self.decoder(quantized)
-        return x_recon, vq_loss
+        return x_recon, vq_loss, encoding_indices
 ```
 
 ---
@@ -463,8 +464,8 @@ all_indices = []
 with torch.no_grad():
     for img, _ in train_loader:
         z_e = model.encoder(img.to(device))
-        quantized , _ = model.vq(z_e)
-        all_indices.append(quantized.cpu())
+        _, _, indices = model(x)
+        all_indices.append(indices.cpu())
 
 # 拼接为 [B , C , H , W]
 all_indices = torch.cat(all_indices, dim=0)
