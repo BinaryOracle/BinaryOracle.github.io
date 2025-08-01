@@ -212,6 +212,20 @@ class Encoder(nn.Module):
         x = self.conv2(x)
         return x
 ```
+在 VQ-VAE 中，一张输入图像最终被编码为一个 二维的“索引矩阵”，这个矩阵的每一个元素对应于 codebook 中的一个嵌入向量（embedding vector），表示该位置的图像特征。
+
+**不是编码为“一个嵌入向量”的原因**
+
+- 单一嵌入向量（如普通 VAE）：只能保留全局信息，比如图像的类别、姿态等，但无法表达空间结构。
+
+- 二维嵌入索引矩阵：是每个图像区域（patch/block）对应一个离散 token，可保留局部+空间结构，适合还原复杂细节。
+
+**目标不同：压缩 vs 生成**
+
+- 传统 AE/VAE 通常用作图像压缩或聚类，输出一个固定维度的表示。
+
+- VQ-VAE 是为生成任务设计的：最终需要还原整张图像，因此不能只用一个全局向量（太少了），而必须保留空间布局。
+
 ---
 
 **步骤 2️⃣：量化连续隐变量（离散化）**
@@ -394,7 +408,128 @@ for epoch in range(num_epochs):
     print(f"Epoch [{epoch+1}/{num_epochs}], Recon Loss: {total_recon_loss:.4f}, VQ Loss: {total_vq_loss:.4f}")
 ```
 
----
+### 生成阶段
+
+1. VQ-VAE：学习将图像压缩为离散 latent 表示，并能重建图像。
+
+2. PixelCNN：学习这些离散 latent 的分布，从而生成新的 latent 表示。
+
+3. 解码阶段：用训练好的 VQ-VAE decoder，将 PixelCNN 采样的 latent 转换为图像。
+
+PixelCNN 模型实现如下(只有空间掩码卷积):
+
+```python
+class MaskedConv2d(nn.Conv2d):
+    def __init__(self, mask_type, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        assert mask_type in ['A', 'B']
+        self.mask_type = mask_type
+        self.register_buffer('mask', torch.ones_like(self.weight))
+
+        _, _, h, w = self.weight.size()
+        yc, xc = h // 2, w // 2
+
+        self.mask[:, :, yc, xc+1:] = 0
+        self.mask[:, :, yc+1:] = 0
+        if mask_type == 'A':
+            self.mask[:, :, yc, xc] = 0
+
+    def forward(self, x):
+        self.weight.data *= self.mask
+        return super().forward(x)
+
+class PixelCNN(nn.Module):
+    def __init__(self, num_embeddings, in_channels=1, hidden_channels=64, num_layers=7):
+        super().__init__()
+        layers = [MaskedConv2d('A', in_channels, hidden_channels, kernel_size=7, padding=3), nn.ReLU()]
+        for _ in range(num_layers - 2):
+            layers.append(MaskedConv2d('B', hidden_channels, hidden_channels, 3, padding=1))
+            layers.append(nn.ReLU())
+        layers.append(nn.Conv2d(hidden_channels, num_embeddings, 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+```
+
+基于已经训练好的VQ-VAE模型，再次扫描训练集，提取训练集中每个图像对应的离散 latent 索引列表
+
+```python
+# 假设：vqvae = VQVAE(...)，已经训练完毕或已加载权重
+# 使用训练集提取离散 latent 索引
+model.eval()
+all_indices = []
+
+with torch.no_grad():
+    for img, _ in train_loader:
+        z_e = model.encoder(img.to(device))
+        quantized , _ = model.vq(z_e)
+        all_indices.append(quantized.cpu())
+
+# 拼接为 [B , C , H , W]
+all_indices = torch.cat(all_indices, dim=0)
+```
+基于离散 latent 索引列表，训练 PixelCNN 模型，学习这些离散 latent 的分布规律：
+
+```python
+# PixelCNN 训练（学习 latent 索引分布）
+pixelcnn = PixelCNN(num_embeddings=512).to(device)
+optimizer = torch.optim.Adam(pixelcnn.parameters(), lr=1e-3)
+loss_fn = nn.CrossEntropyLoss()
+
+for epoch in range(10):
+    total_loss = 0
+    for i in range(0, all_indices.size(0), 64):
+        batch = all_indices[i:i+64].to(device)  # [B, C, H, W]
+        input = batch.unsqueeze(1).float() / 512.0  # 归一化处理
+        target = batch.long()
+
+        logits = pixelcnn(input)  # [B, C, H, W]
+        loss = loss_fn(logits, target)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+
+    print(f"[PixelCNN] Epoch {epoch+1} Loss: {total_loss:.4f}")
+```
+
+PixelCNN 生成 latent 索引 → VQ-VAE 解码成图像
+
+```python
+def sample_latent(pixelcnn, shape, num_embeddings):
+    pixelcnn.eval()
+    with torch.no_grad():
+        B, H, W = shape
+        sample = torch.zeros((B, 1, H, W), device=device)
+        for i in range(H):
+            for j in range(W):
+                logits = pixelcnn(sample)
+                probs = F.softmax(logits[:, :, i, j], dim=-1)
+                sample[:, 0, i, j] = torch.multinomial(probs, 1).squeeze(-1)
+        return sample.squeeze(1).long()  # [B, H, W]
+
+# 从 PixelCNN 生成 latent 索引
+sampled_indices = sample_latent(pixelcnn, shape=(8, 7, 7), num_embeddings=512)
+
+# 还原为 codebook 嵌入向量
+embeddings = model.quantizer.embeddings.weight
+quantized = embeddings[sampled_indices.view(-1)].view(8, 7, 7, -1).permute(0, 3, 1, 2).contiguous()
+
+# 解码成图像
+with torch.no_grad():
+    recon = model.decoder(quantized).cpu()
+
+# 可视化
+import matplotlib.pyplot as plt
+for i in range(8):
+    plt.subplot(2, 4, i+1)
+    plt.imshow(recon[i][0], cmap='gray')
+    plt.axis('off')
+plt.suptitle("Generated Images from PixelCNN + VQ-VAE")
+plt.show()
+```
 
 ## **转载**
 
