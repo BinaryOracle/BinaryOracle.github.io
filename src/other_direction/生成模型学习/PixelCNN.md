@@ -347,6 +347,7 @@ class PixelCNN(nn.Module):
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torchvision.utils import save_image
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from Model import PixelCNN
@@ -361,7 +362,13 @@ train_dataset = datasets.MNIST(root='./data', train=True, download=True, transfo
 train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
 # 2. 模型实例化
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
+
 model = PixelCNN(no_layers=8, kernel=7, channels=64, device=device).to(device)
 
 # 3. 损失函数与优化器
@@ -413,7 +420,7 @@ with torch.no_grad():
             samples[:, 0, i, j] = sampled.float() / 255.0       # 写入归一化像素值
 
 # 保存生成图像
-vutils.save_image(samples, "pixelcnn_generated.png", nrow=8, padding=2)
+save_image(samples, "pixelcnn_generated.png", nrow=8, padding=2)
 print("图像已生成并保存为 pixelcnn_generated.png")
 ```
 

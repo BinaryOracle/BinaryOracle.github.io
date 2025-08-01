@@ -1,5 +1,5 @@
 ---
-title: VQ-VAE 论文
+title: VQ-VAE 论文解读与代码实现
 icon: file
 category:
   - 生成模型
@@ -7,13 +7,15 @@ tag:
   - 生成模型
   - 编辑中
 footer: 技术共建，知识共享
-date: 2025-07-30
+date: 2025-08-01
 author:
   - BinaryOracle
 ---
 
-`Neural Discrete Representation Learning 论文简析` 
+`VQ-VAE 论文解读与代码实现` 
 
 <!-- more -->
 
-> 论文链接: [Neural Discrete Representation Learning](https://arxiv.org/abs/1711.00937)
+# 引言
+
+
