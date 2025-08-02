@@ -387,26 +387,41 @@ train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
 model = VQVAE().to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
+# 加载预训练模型（可选）
+model_loaded = False
+try:
+    model.load_state_dict(torch.load("vqvae.pth", map_location=device))
+    print("✅ 成功加载预训练的 VQ-VAE 模型权重")
+    model_loaded = True
+except FileNotFoundError:
+    print("⚠️ 未找到预训练模型，开始从头训练")
+
+
 # 训练模型
-num_epochs = 10
-for epoch in range(num_epochs):
-    model.train()
-    total_recon_loss = 0
-    total_vq_loss = 0
-    for x, _ in train_loader:
-        x = x.to(device)
-        x_recon, vq_loss, _ = model(x)
-        recon_loss = F.mse_loss(x_recon, x)
-        loss = recon_loss + vq_loss
+if not model_loaded:
+    num_epochs = 10
+    for epoch in range(num_epochs):
+        model.train()
+        total_recon_loss = 0
+        total_vq_loss = 0
+        for x, _ in train_loader:
+            x = x.to(device)
+            x_recon, vq_loss, _ = model(x)
+            recon_loss = F.mse_loss(x_recon, x)
+            loss = recon_loss + vq_loss
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-        total_recon_loss += recon_loss.item()
-        total_vq_loss += vq_loss.item()
+            total_recon_loss += recon_loss.item()
+            total_vq_loss += vq_loss.item()
 
-    print(f"Epoch [{epoch+1}/{num_epochs}], Recon Loss: {total_recon_loss:.4f}, VQ Loss: {total_vq_loss:.4f}")
+        print(f"Epoch [{epoch+1}/{num_epochs}], Recon Loss: {total_recon_loss:.4f}, VQ Loss: {total_vq_loss:.4f}")
+    # 保存模型
+    torch.save(model.state_dict(), "vqvae.pth")
+else:
+    print("⏭️ 已加载预训练模型，跳过训练过程")
 ```
 
 ### 生成阶段
@@ -464,7 +479,7 @@ all_indices = []
 with torch.no_grad():
     for img, _ in train_loader:
         z_e = model.encoder(img.to(device))
-        _, _, indices = model(x)
+        _, _, indices = model.vq(z_e)
         all_indices.append(indices.cpu())
 
 # 拼接为 [B , C , H , W]
@@ -478,22 +493,36 @@ pixelcnn = PixelCNN(num_embeddings=512).to(device)
 optimizer = torch.optim.Adam(pixelcnn.parameters(), lr=1e-3)
 loss_fn = nn.CrossEntropyLoss()
 
-for epoch in range(10):
-    total_loss = 0
-    for i in range(0, all_indices.size(0), 64):
-        batch = all_indices[i:i+64].to(device)  # [B, C, H, W]
-        input = batch.unsqueeze(1).float() / 512.0  # 归一化处理
-        target = batch.long()
+# 加载预训练 PixelCNN 模型（可选）
+pixelcnn_loaded = False
+try:
+    pixelcnn.load_state_dict(torch.load("pixelcnn.pth", map_location=device))
+    print("✅ 成功加载预训练的 PixelCNN 模型权重")
+    pixelcnn_loaded = True
+except FileNotFoundError:
+    print("⚠️ 未找到预训练 PixelCNN 模型，开始从头训练")
 
-        logits = pixelcnn(input)  # [B, C, H, W]
-        loss = loss_fn(logits, target)
+if not pixelcnn_loaded:
+    for epoch in range(10):
+        total_loss = 0
+        for i in range(0, all_indices.size(0), 64):
+            batch = all_indices[i:i+64].to(device)
+            input = batch.unsqueeze(1).float() / 512.0  # 归一化处理
+            target = batch.long()
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
+            logits = pixelcnn(input)  # [B, 1, H, W]
+            loss = loss_fn(logits, target)
 
-    print(f"[PixelCNN] Epoch {epoch+1} Loss: {total_loss:.4f}")
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+        print(f"[PixelCNN] Epoch {epoch+1} Loss: {total_loss:.4f}")
+    # 保存模型
+    torch.save(pixelcnn.state_dict(), "pixelcnn.pth")
+else:
+    print("⏭️ 已加载预训练 PixelCNN 模型，跳过训练过程")
 ```
 > PixelCNN 学习的是 latent index 的分布
 
@@ -504,7 +533,7 @@ def sample_latent(pixelcnn, shape, num_embeddings):
     pixelcnn.eval()
     with torch.no_grad():
         B, H, W = shape
-        sample = torch.zeros((B, 1, H, W), device=device)
+        sample = torch.zeros((B, 1, H, W)).to(device)  # 初始化 sample
         for i in range(H):
             for j in range(W):
                 logits = pixelcnn(sample)
@@ -516,7 +545,7 @@ def sample_latent(pixelcnn, shape, num_embeddings):
 sampled_indices = sample_latent(pixelcnn, shape=(8, 7, 7), num_embeddings=512)
 
 # 还原为 codebook 嵌入向量
-embeddings = model.quantizer.embeddings.weight
+embeddings = model.vq.embedding.weight
 quantized = embeddings[sampled_indices.view(-1)].view(8, 7, 7, -1).permute(0, 3, 1, 2).contiguous()
 
 # 解码成图像
