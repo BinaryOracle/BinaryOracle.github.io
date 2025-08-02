@@ -507,10 +507,11 @@ if not pixelcnn_loaded:
         total_loss = 0
         for i in range(0, all_indices.size(0), 64):
             batch = all_indices[i:i+64].to(device)
-            input = batch.unsqueeze(1).float() / 512.0  # 归一化处理
+            input = batch.unsqueeze(1).float()
             target = batch.long()
-
-            logits = pixelcnn(input)  # [B, 1, H, W]
+            
+            # input 维度: (64,1,7,7) , logits 维度: (64,512,7,7) ，target 维度: (64,7,7)
+            logits = pixelcnn(input)
             loss = loss_fn(logits, target)
 
             optimizer.zero_grad()
