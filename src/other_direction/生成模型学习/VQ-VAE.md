@@ -482,7 +482,7 @@ with torch.no_grad():
         _, _, indices = model.vq(z_e)
         all_indices.append(indices.cpu())
 
-# 拼接为 [B , C , H , W]
+# 拼接为 [B , H , W]
 all_indices = torch.cat(all_indices, dim=0)
 ```
 基于离散 latent 索引列表，训练 PixelCNN 模型，学习这些离散 latent 的分布规律：
