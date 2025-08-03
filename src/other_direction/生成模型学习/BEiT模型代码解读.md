@@ -437,3 +437,126 @@ KL = (p * (log_p - log_q)).sum()
 总结为一句话：
 
 > 使用均匀先验是为了鼓励编码器生成的离散 token 分布更加均衡，避免 code collapse，从而充分利用整个 codebook 的表示能力。
+
+## 块状遮挡（blockwise masking）策略
+
+块状遮挡通过遮盖图像中的连续 patch 区域，更真实地模拟自然场景中的遮挡，增强模型对上下文的理解能力，避免信息泄漏，同时实现简单且与基于patch的模型结构高度契合，因此比像素级别遮挡更有效和实用。
+
+遮挡方式：
+
+1. 将图像划分为 $H \times W$ 个 patch
+
+2. 每次遮挡一个矩形块区域，如 4×4 或 6×3 的 patch 区域
+
+3. 最终总共遮掉 num_masking_patches 个 patch
+
+相比于逐 patch 独立遮挡（如 random token masking），这种遮挡方式：
+
+| 遮挡方式 | 特点 | 对比优势 |
+| --- | --- | --- |
+| 随机单 patch 遮挡 | 每个 patch 独立被遮或不遮 | 遮挡区域零碎 |
+| ✅ 块状遮挡 | 遮一片连续矩形区域 | 更符合图像结构、语义连续 |
+
+块状掩码策略的具体实现代码如下所示，首先给出的是掩码生成器的初始化方法，重点注意各个参数的含义:
+
+```python
+class MaskingGenerator:
+    def __init__(
+            self, input_size,                 # 输入图像的 patch 网格大小（如 14 表示 14x14 patch）
+            num_masking_patches,             # 最终要 mask 掉的 patch 总数量
+            min_num_patches=4,               # 每次生成一个遮挡块时，最小 patch 数
+            max_num_patches=None,            # 每次遮挡块最多的 patch 数；默认等于 num_masking_patches
+            min_aspect=0.3,                  # 遮挡块的最小宽高比（例如 h/w = 0.3）
+            max_aspect=None):               # 最大宽高比，默认取 1 / min_aspect（对称处理）
+        
+        # 如果输入是整数，则构造成正方形大小的 patch 网格
+        if not isinstance(input_size, tuple):
+            input_size = (input_size, ) * 2
+        self.height, self.width = input_size  # patch 网格的高和宽（例如 14x14）
+
+        self.num_patches = self.height * self.width  # 总共可用 patch 数量
+        self.num_masking_patches = num_masking_patches  # 需要被 mask 的 patch 总数
+
+        self.min_num_patches = min_num_patches  # 单个遮挡块的最小 patch 数
+        # 若 max_num_patches 未指定，则设为总遮挡目标数（不限制）
+        self.max_num_patches = num_masking_patches if max_num_patches is None else max_num_patches
+
+        # 如果未指定最大宽高比，默认与 min_aspect 互为倒数，保持对称性
+        max_aspect = max_aspect or 1 / min_aspect
+
+        # 记录宽高比范围的对数形式，便于采样（log 均匀采样 → 平滑控制长宽比例分布）
+        self.log_aspect_ratio = (math.log(min_aspect), math.log(max_aspect))
+```
+下面将展示正式执行块状遮挡策略前的准备工作:
+
+```python
+def __call__(self):
+    # 初始化一个全零的遮挡掩码，大小为输入图像的patch数目（height x width）
+    mask = np.zeros(shape=self.get_shape(), dtype=np.int)
+    mask_count = 0  # 当前已经遮挡的patch数量
+
+    # 循环直到遮挡的patch数量达到指定的遮挡总数
+    while mask_count < self.num_masking_patches:
+        # 计算本轮最多还能遮挡的patch数
+        max_mask_patches = self.num_masking_patches - mask_count
+        # 限制本次遮挡的patch数量不超过最大遮挡数
+        max_mask_patches = min(max_mask_patches, self.max_num_patches)
+
+        # 尝试生成一个遮挡块，返回本次新增遮挡的patch数量
+        delta = self._mask(mask, max_mask_patches)
+        if delta == 0:
+            # 如果没有新增遮挡（即无法再生成有效遮挡块），跳出循环
+            break
+        else:
+            # 更新已遮挡patch数量
+            mask_count += delta
+
+    # 返回最终生成的遮挡掩码（0表示未遮挡，1表示遮挡）
+    return mask
+```
+
+执行块状遮挡策略的核心代码实现如下:
+
+```python
+def _mask(self, mask, max_mask_patches):
+    delta = 0  # 记录本次新增遮挡的patch数量
+    for attempt in range(10):  # 最多尝试10次生成遮挡块
+        # 随机采样目标遮挡面积（patch数量），范围在[min_num_patches, max_mask_patches]之间
+        # random.uniform 是均匀采样，即每一个值被采样到的可能性完全相等
+        target_area = random.uniform(self.min_num_patches, max_mask_patches)
+        # 随机采样遮挡块的长宽比（在log空间均匀采样后exp还原）
+        aspect_ratio = math.exp(random.uniform(*self.log_aspect_ratio))
+        
+        # 根据面积和长宽比计算遮挡块的高度和宽度（向最近整数取整）
+        # h * w ≈ target_area 
+        # h / w ≈ aspect_ratio
+        # h^2 =  target_area * aspect_ratio;  w^2 = target_area / aspect_ratio
+        h = int(round(math.sqrt(target_area * aspect_ratio)))
+        w = int(round(math.sqrt(target_area / aspect_ratio)))
+        
+        # 检查遮挡块尺寸是否小于输入图像patch尺寸，确保遮挡块可放入图像范围内
+        if w < self.width and h < self.height:
+            # 随机采样遮挡块在图像上的左上角位置，确保遮挡块不会越界
+            top = random.randint(0, self.height - h)
+            left = random.randint(0, self.width - w)
+
+            # 计算遮挡块区域内已被遮挡的patch数
+            num_masked = mask[top: top + h, left: left + w].sum()
+
+            # 判断当前遮挡块的有效新增遮挡数量
+            # 必须新增遮挡patch数>0且不超过最大允许遮挡数
+            if 0 < h * w - num_masked <= max_mask_patches:
+                # 遍历遮挡块区域，将未遮挡的patch设置为遮挡（1），累计新增遮挡数量
+                for i in range(top, top + h):
+                    for j in range(left, left + w):
+                        if mask[i, j] == 0:
+                            mask[i, j] = 1
+                            delta += 1
+
+            # 如果本次成功新增了遮挡patch，跳出尝试循环
+            if delta > 0:
+                break
+    # 返回本次新增的遮挡patch数量
+    return delta
+```
+
