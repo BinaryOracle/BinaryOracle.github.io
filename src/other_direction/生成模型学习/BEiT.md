@@ -5,7 +5,7 @@ category:
   - 多模态
 tag:
   - 多模态
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-08-02
 author:
@@ -17,6 +17,7 @@ author:
 <!-- more -->
 
 > 论文链接: [BEiT: BERT Pre-Training of Image Transformers](https://arxiv.org/abs/2106.08254)
+> 代码链接: [https://github.com/microsoft/unilm/tree/master/beit](https://github.com/microsoft/unilm/tree/master/beit)
 
 ## 摘要
 
@@ -275,4 +276,139 @@ $$
 在完成自监督预训练后，我们可以在一个数据量更丰富的中间数据集（如 ImageNet-1K）上进一步训练 BEIT，然后再将模型迁移到具体的下游任务上进行微调。
 
 这种“中间微调”策略在 NLP 中已经成为常规做法，我们在 BEIT 中也直接采用了类似的方法。
+
+## 实验
+
+### 消融实验（Ablation Studies）
+
+我们分析了 BEIT 各组成部分的重要性。所有模型都在 ImageNet（分类）和 ADE20K（分割）任务上评估，预训练步数为 300 epoch（约为主实验 800 epoch 的 37.5%）。
+
+**表 4** 展示了不同变体的实验结果：
+
+![](BEiT/4.png)
+
+1. **去除 blockwise masking**：即随机选择 mask 的 patch，而非以 block 为单位遮挡。发现 blockwise masking 尤其对语义分割帮助很大。
+
+2. **去除视觉 token，改为像素重建**：预训练目标变成恢复原始像素，效果明显变差，甚至不如从零训练的 Transformer。
+
+3. **同时去除视觉 token 和 blockwise masking**：进一步加剧性能下降。
+
+4. **预测所有 token（即不遮挡）**：性能也有所下降，说明遮挡带来的表示学习能力是关键。
+
+5. **延长预训练时间（800 epoch）**：显著提升下游任务性能。
+
+结论：**视觉 token 与遮挡机制是 BEIT 有效的关键组成。**
+
+---
+
+### 自注意力图的分析
+
+我们发现 BEIT 的自注意力机制可以自动学会区分图像中的语义区域，**尽管预训练时没有用任何人工标注**。
+
+我们使用 COCO 图像做可视化（避免出现在预训练数据中），展示了不同 reference patch 的注意力图。具体方法是：
+
+* 取最后一层 self-attention 的 query-key 乘积；
+
+* 对某个 patch 为 query，显示它关注哪些其他 patch。
+
+
+![](BEiT/2.png)
+
+结果表明，BEIT 的 attention head 能够自动关注对象边界或同类区域，这种内在学习能力可能是 BEIT 能在下游任务上泛化得更好的原因之一，特别是在小样本数据集上。
+
+## 相关工作
+
+### 自监督视觉预训练
+
+自监督视觉预训练方法可以大致分为三类：
+
+#### 1. 对比学习（Contrastive Learning）
+
+对比学习通过拉近相似图像（如不同数据增强后的同一图像）之间的距离，并拉远其他图像。典型代表包括：
+
+* MoCo、SimCLR、SwAV、BYOL、Barlow Twins；
+
+* 近期的方法如 DINO、MoCo v3 也可用于 Transformer；
+
+* iBOT 综合了 MIM 和对比学习。
+
+这些方法需要构造正负样本对，并依赖于数据增强的设计。
+
+#### 2. 生成式预训练（Generative Pretraining）
+
+这类方法试图从原始图像中恢复遮挡部分：
+
+* iGPT 使用像素序列建模；
+
+* ViT 使用 patch 分类作为监督任务；
+
+* GANs（如 BigGAN）可用于图像生成，但不适合表征学习。
+
+像素恢复任务通常难以训练，且容易聚焦低级细节而非语义结构。
+
+#### 3. 目标预训练（Pretext Task）
+
+设计特定任务作为学习信号：
+
+* 旋转预测；
+
+* 图像 jigsaw 拼图；
+
+* DAE、MAE 等自动编码器结构；
+
+* 这些方法训练稳定，但有效性有限。
+
+BEIT 提供了新方向：将图像预训练目标设计为 “**语义 token 预测**”，而非像素或对比目标。
+
+---
+
+### 离散表示学习（Discrete Representation Learning）
+
+使用离散表示（token）可以使模型从输入中学习更抽象的语义信息。关键代表包括：
+
+* **VQ-VAE** 提出了 vector quantization 机制，将连续表示映射为离散 codebook；
+
+* **VQ-VAE-2** 和 **dVAE** 进一步改进重建质量与稳定性；
+
+* 这些方法常用于图像生成（PixelCNN/VQ-GAN）和音频建模；
+
+* BEIT 借助 dVAE 提供的视觉 token，将离散化思想引入图像预训练任务。
+
+---
+
+### BERT 式的预训练方法（BERT-style Pretraining）
+
+BERT 是 NLP 中最成功的预训练方法之一，基于 “mask 掉 token 并预测它” 的思想，启发了 BEIT 的设计。
+
+* BEIT 类似于图像领域的 “BERT”，输入为 patch，输出为被 mask 掉的 token；
+
+* iGPT 也借鉴了 BERT 思路，但直接在像素上建模，学习成本高；
+
+* MAE 是 BEIT 的后续工作之一，直接预测图像 patch 的像素；
+
+* BEIT 是第一个真正从 token 层面借用 BERT 的图像模型。
+
+---
+
+### 多模态预训练（Multimodal Pretraining）
+
+在图像与文本结合任务中，使用 token 化的表示也非常常见：
+
+* DALL·E、CLIP 将图像编码为离散 token；
+
+* ViLT、UNITER 等通过共享 Transformer 编码图文对；
+
+* 图像 tokenizer（如 dVAE、VQ-GAN）是许多多模态生成模型的关键组成；
+
+* BEIT 借鉴这种 token 化方法，为纯视觉模型设计了自监督 token 预测任务。
+
+## 结论
+
+我们提出了 **BEIT**（**B**idirectional **E**ncoder representation from **I**mage **T**ransformers），一种基于图像 Transformer 的自监督预训练方法。受 BERT 在自然语言处理中的成功启发，BEIT 通过遮挡图像 patch 并预测相应的视觉 token，将 BERT 式的 Masked Language Modeling 思想成功引入视觉领域。
+
+我们的工作首次提出以 **图像视觉 token** 为预测目标，训练一个 BERT 风格的视觉 Transformer，从而实现强大的图像表征学习能力。在多个视觉任务中，如图像分类与语义分割，BEIT 展示出卓越的性能，超越了基于监督学习或对比学习的主流方法。
+
+此外，我们也展示了通过联合 dVAE、合适的 masking 策略与稳定的训练流程，可以使大规模图像预训练具备更强的可扩展性，为更大模型（如 BEIT-L）提供了稳定基础。
+
+我们相信，本研究为 **统一视觉预训练框架** 打下了基础，也为未来探索更强大的视觉理解与生成模型提供了方向。
 
