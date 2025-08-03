@@ -562,6 +562,9 @@ for i in range(8):
 plt.suptitle("Generated Images from PixelCNN + VQ-VAE")
 plt.show()
 ```
+由于训练轮次很少，所以效果也比较差:
+
+![](VQ-VAE/9.png)
 
 ## **转载**
 
