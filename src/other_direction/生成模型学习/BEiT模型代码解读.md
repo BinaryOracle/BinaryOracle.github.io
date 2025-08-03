@@ -243,6 +243,60 @@ Gumbel Softmax 使模型在训练时可以对这些 logits 进行采样，得到
 
 > 当 `hard=True` 时，可以模拟硬采样（one-hot向量），方便离散索引的推断，同时仍保证梯度流通。
 
+##### hard=True时，如何实现的？
+
+当 `hard=self.straight_through` 为 `True` 时，**Gumbel-Softmax 采样**过程使用了一种称为 **Straight-Through Gumbel-Softmax** 的技巧，它使得：
+
+* **前向传播**时是**one-hot 向量**（离散），
+
+* **反向传播**时仍保持**连续可导**（通过 softmax）
+
+在 VAE 或 BEiT 的离散编码器中，我们希望：
+
+* 对图像进行**离散 token 编码**（便于 Transformer 训练）
+
+* 但同时又希望这个采样过程能**反向传播梯度**
+
+这就引出了 Straight-Through Gumbel-Softmax：
+
+---
+
+采样过程详解:
+
+```python
+soft_one_hot = F.gumbel_softmax(logits, tau=temp, dim=1, hard=True)
+```
+
+等价于：
+
+```python
+y_soft = softmax((logits + GumbelNoise) / tau)     # 连续分布，用于反向传播
+index = argmax(y_soft)                             # 找到最大概率的 one-hot 索引
+y_hard = one_hot(index)                            # 得到一个离散的 one-hot 向量
+
+# 关键一步：straight-through trick
+y = y_hard.detach() - y_soft.detach() + y_soft
+```
+
+---
+
+```python
+y = y_hard.detach() - y_soft.detach() + y_soft
+```
+
+* `y_hard.detach()`：将 one-hot 向量从计算图中**分离出来**（不可导）
+
+* `y_soft.detach()`：也分离出来，表示不在反向传播中参与梯度计算
+
+* `+ y_soft`：把 soft 向量加入回来，用于**反向传播**
+
+➡️ 整体效果：
+
+| 方向       | 数据流                 | 梯度流       |
+| -------- | ------------------- | --------- |
+| forward  | 使用 one-hot 离散 token | ——        |
+| backward | 使用 softmax 的连续梯度    | 保持可导，稳定训练 |
+
 #### smooth_l1_loss
 
 `smooth_l1_loss` 是 PyTorch 中的一种 **回归损失函数**，也被称为 **Huber Loss** 的一种变体，它结合了均方误差（MSE）和平均绝对误差（MAE）的优点，在处理 **异常值/离群点鲁棒性更强**。
@@ -266,3 +320,120 @@ $$
 * 更容易在训练中收敛，因为梯度变化更平滑
 
 > **`smooth_l1_loss` 是一个融合了 MSE 的平滑性与 L1 的鲁棒性的损失函数，常用于图像回归与重建任务中，能更好处理异常误差。**
+
+#### KL散度计算
+
+```python
+        # KL 散度损失（可选，衡量 q(y) 与 uniform 的差异）
+        logits = rearrange(logits, 'b n h w -> b (h w) n')  # 展平空间维度: [B, num_tokens, H, W] 变为 [B, H*W, num_tokens]
+        qy = F.softmax(logits, dim=-1)                      # 每个位置的 token 概率分布
+        log_qy = torch.log(qy + 1e-10)                      # 避免 log(0)
+
+        log_uniform = torch.log(torch.tensor([1. / num_tokens], device=device))
+        kl_div = F.kl_div(log_uniform, log_qy, None, None, reduction='batchmean', log_target=True)
+```
+在这段代码中，我们计算的是**编码器输出分布** $q(y)$ 与一个**先验分布** $p(y)$ 之间的 Kullback-Leibler 散度，记作：
+
+$$
+\mathrm{KL}(p(y) \,\|\, q(y)) = \sum_{i=1}^{N} p(y_i) \cdot \left[ \log p(y_i) - \log q(y_i) \right]
+$$
+
+其中：
+
+* $p(y)$：先验分布（理想中我们希望 encoder 生成的分布接近它）
+
+* $q(y)$：encoder 对图像每个 patch 给出的 softmax 分布
+
+* $N$：codebook 中的 token 数，即 `num_tokens`
+
+在本代码中：
+
+* $p(y_i) = \frac{1}{N}$，即是**均匀分布**
+
+* 所以 $\log p(y_i) = \log \left(\frac{1}{N}\right) = -\log N$
+
+带入公式得到：
+
+$$
+\mathrm{KL}(p(y) \,\|\, q(y)) = \sum_{i=1}^{N} \frac{1}{N} \cdot \left[ -\log N - \log q(y_i) \right]
+= -\log N - \frac{1}{N} \sum_{i=1}^N \log q(y_i)
+$$
+
+也就是：
+
+$$
+\mathrm{KL}(p(y) \,\|\, q(y)) = \text{常数} - \mathbb{E}_{i \sim \text{uniform}}[\log q(y_i)]
+$$
+
+这个损失鼓励 q 趋近于均匀，从而避免编码器只用很少几个 token。
+
+---
+
+##### log_target 参数
+
+```python
+F.kl_div(input, target, log_target=False)
+```
+
+此时，**`input` 是 log 概率** $\log q_i$，**`target` 是概率** $p_i$，计算公式为：
+
+$$
+\text{KL}(p \| q) = \sum_i p_i \cdot (\log p_i - \log q_i)
+$$
+
+即：
+
+```python
+F.kl_div(log_q, p, log_target=False)
+```
+
+----
+
+```python
+F.kl_div(log_p, log_q, log_target=True)
+```
+
+此时认为 **两个参数都是 log 概率**，底层计算公式变为：
+
+$$
+\text{KL}(p \| q) = \sum_i \exp(\log p_i) \cdot (\log p_i - \log q_i)
+$$
+
+也就是 PyTorch 自动执行：
+
+```python
+KL = (p * (log_p - log_q)).sum()
+```
+
+其中：
+
+* $\exp(\log p_i) = p_i$
+
+* $\exp(\log q_i) = q_i$
+
+⚠️ 注意：这种方式需要我们手动把两个分布都以 `log` 形式传进去。
+
+----
+
+##### 为什么先验分布设置为均匀分布？
+
+这是为了满足 **信息瓶颈** 或 **高效利用 codebook** 的目标：
+
+1. **VQ-VAE 的典型问题：code collapse**
+
+* 编码器如果训练不当，可能会只偏好极少数几个 code（比如 512 个 code 中只用 10 个），这是 **codebook collapse**。
+
+* 结果就是：虽然理论上有 512 种可能的图像 patch 表达，但实际只用了极少数，模型表达能力受限。
+
+2. **使用均匀先验的好处**
+
+* 均匀分布意味着我们希望所有 token 被“平等地使用”。
+
+* 加上 KL 散度约束后，编码器会被正则化为“尽可能平均地使用每个 token”。
+
+* 这样可以**提高 codebook 的使用率**，提升模型的表达多样性。
+
+
+总结为一句话：
+
+> 使用均匀先验是为了鼓励编码器生成的离散 token 分布更加均衡，避免 code collapse，从而充分利用整个 codebook 的表示能力。
