@@ -1,10 +1,10 @@
 ---
-title: 吴恩达-大语言模型应用开发课程
+title: 在线学习
 index: false
 icon: robot
 article: false
 dir:
-  order: 4
+  order: 3
 footer: 技术共建，知识共享  
 ---
 
