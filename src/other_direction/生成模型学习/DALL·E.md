@@ -21,127 +21,231 @@ author:
 
 ## 代码实现
 
+`DALL·E` 将 **文本-图像生成** 问题建模为一个**自回归语言建模任务**，即将**文本 token 和图像 token 拼接**起来，作为一个**统一的序列**进行训练，从而学会生成图像的离散表示。 具体的流程如下图所示:
+
 ![DALL-E 模型前向传播整体流程](DALL-E/3.png)
 
-### DALL-E 主模型
+### 模型初始化
 
-`DALL·E` 将 **文本-图像生成** 问题建模为一个**自回归语言建模任务**，即将**文本 token 和图像 token 拼接**起来，作为一个**统一的序列**进行训练，从而学会生成图像的离散表示。
-
-#### 初始化方法
+我们需要通过 `DALL-E` 模型的初始化流程，来熟悉模型中使用到的一些参数及其含义:
 
 ```python
-class DALLE(nn.Module):
-    def __init__(
-        self,
-        *,
-        dim,                            # Transformer 的隐藏层维度
-        vae,                            # 图像离散化使用的 VAE（如 DiscreteVAE、OpenAIDiscreteVAE、VQGanVAE）
-        num_text_tokens = 10000,        # 文本词表大小
-        text_seq_len = 256,             # 文本最大序列长度
-        depth,                          # Transformer 层数
-        heads = 8,                      # Attention 头数
-        dim_head = 64,                  # 每个 attention head 的维度
-        reversible = False,             # 是否使用 reversible transformer（节省显存）
-        attn_dropout = 0.,              # attention dropout
-        ff_dropout = 0,                 # feedforward dropout
-        sparse_attn = False,            # 是否使用稀疏 attention
-        attn_types = None,              # 支持混合 attention 类型
-        loss_img_weight = 7,            # 图像 token 损失权重（论文中为 1:7）
-        stable = False,                 # 是否使用稳定化的 Transformer 训练技巧
-        sandwich_norm = False,          # 是否使用 sandwich LayerNorm（LayerNorm前后各一次）
-        shift_tokens = True,            # 是否进行 token shifting（提升模型稳定性）
-        rotary_emb = True,              # 是否使用旋转位置编码
-        shared_attn_ids = None,         # 是否共享注意力模块
-        shared_ff_ids = None,           # 是否共享 feedforward 模块
-        share_input_output_emb = False, # 是否共享输入输出 embedding（减少参数）
-        optimize_for_inference = False, # 推理优化（不使用 Dropout 等）
-    ):
-        # 图像尺寸和 token 数量来自 VAE
-        image_size = vae.image_size                        # 输入图像的尺寸，如 256
-        num_image_tokens = vae.num_tokens                  # 图像 token 的词表大小，如 8192
-        image_fmap_size = image_size // (2 ** vae.num_layers)  # 编码后图像的 feature map 尺寸（例如 16x16）
-        image_seq_len = image_fmap_size ** 2               # 图像 token 序列长度（如 256）
-
-        # 为每个文本位置保留一个唯一 padding token（提高 mask 效果）
-        num_text_tokens = num_text_tokens + text_seq_len
-
-        # 定义文本和图像的位置编码
-        self.text_pos_emb = nn.Embedding(text_seq_len + 1, dim) if not rotary_emb else always(0)  # +1 for <BOS>
-        self.image_pos_emb = AxialPositionalEmbedding(dim, axial_shape=(image_fmap_size, image_fmap_size)) if not rotary_emb else always(0)
-
-        self.num_text_tokens = num_text_tokens  # 用于后续 logits 偏移与 loss 计算
-        self.num_image_tokens = num_image_tokens
-
-        self.text_seq_len = text_seq_len
-        self.image_seq_len = image_seq_len
-
-        seq_len = text_seq_len + image_seq_len            # 总序列长度（文本 + 图像）
-        total_tokens = num_text_tokens + num_image_tokens # 总 token 数（用于 logits 输出）
-        self.total_tokens = total_tokens
-        self.total_seq_len = seq_len
-
-        self.vae = vae
-        set_requires_grad(self.vae, False)                # 冻结 VAE（不参与训练）
-
-        # 构建 Transformer，用于联合建模文本和图像 token
-        self.transformer = Transformer(
-            dim=dim,
-            causal=True,                  # 自回归建模
-            seq_len=seq_len,
-            depth=depth,
-            heads=heads,
-            dim_head=dim_head,
-            reversible=reversible,
-            attn_dropout=attn_dropout,
-            ff_dropout=ff_dropout,
-            attn_types=attn_types,
-            image_fmap_size=image_fmap_size,
-            sparse_attn=sparse_attn,
-            stable=stable,
-            sandwich_norm=sandwich_norm,
-            shift_tokens=shift_tokens,
-            rotary_emb=rotary_emb,
-            shared_attn_ids=shared_attn_ids,
-            shared_ff_ids=shared_ff_ids,
-            optimize_for_inference=optimize_for_inference,
-        )
-
-        self.stable = stable
-        if stable:
-            self.norm_by_max = DivideMax(dim=-1)          # 稳定化处理
-
-        # 最后的输出映射到 logits（用于 cross entropy loss）
-        self.to_logits = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, self.total_tokens),            # 输出维度 = 全部 token 数（文本+图像）
-        )
-
-        # Embedding 层：可以选择共享输入输出权重
-        if share_input_output_emb:
-            self.text_emb = SharedEmbedding(self.to_logits[1], 0, num_text_tokens)
-            self.image_emb = SharedEmbedding(self.to_logits[1], num_text_tokens, total_tokens)
-        else:
-            self.text_emb = nn.Embedding(num_text_tokens, dim)
-            self.image_emb = nn.Embedding(num_image_tokens, dim)
-
-        # 构造 logits mask（防止文本位置预测图像 token，反之亦然）
-        seq_range = torch.arange(seq_len)
-        logits_range = torch.arange(total_tokens)
-
-        seq_range = rearrange(seq_range, 'n -> () n ()')         # shape: (1, seq_len, 1)
-        logits_range = rearrange(logits_range, 'd -> () () d')   # shape: (1, 1, total_tokens)
-
-        logits_mask = (
-            ((seq_range >= text_seq_len) & (logits_range < num_text_tokens)) |     # 图像位置不能预测文本 token
-            ((seq_range < text_seq_len) & (logits_range >= num_text_tokens))       # 文本位置不能预测图像 token
-        )
-
-        self.register_buffer('logits_mask', logits_mask, persistent=False)  # 注册为 buffer，防止被当作参数保存
-
-        self.loss_img_weight = loss_img_weight  # 图像 loss 的权重，用于 loss 加权（论文中为 7 倍）
+def __init__(
+    self,
+    *,
+    dim,                              # Transformer 的隐藏维度
+    vae,                              # 编码图像的 VAE 模型（用于 image token 的提取）
+    num_text_tokens = 10000,         # 文本词表大小（不含 position padding token）
+    text_seq_len = 256,              # 文本序列最大长度
+    depth,                           # Transformer block 层数
+    heads = 8,                       # Attention 头数
+    dim_head = 64,                   # 每个 attention head 的维度
+    reversible = False,              # 是否使用 reversible transformer
+    attn_dropout = 0.,               # attention dropout 概率
+    ff_dropout = 0,                  # feedforward dropout 概率
+    sparse_attn = False,             # 是否使用稀疏 attention
+    attn_types = None,               # 多种 attention 类型（可选）
+    loss_img_weight = 7,            # 图像损失在最终 loss 中的权重
+    stable = False,                  # 是否使用 numerically stable 的 norm
+    sandwich_norm = False,          # 是否采用 sandwich norm 策略（前中后都加 layernorm）
+    shift_tokens = True,            # 是否对输入 token 做 right shift（训练）
+    rotary_emb = True,              # 是否使用 rotary embedding（相对位置编码）
+    shared_attn_ids = None,         # 用于模块共享的 attention 层 ID（可选）
+    shared_ff_ids = None,           # 用于模块共享的 feedforward 层 ID（可选）
+    share_input_output_emb = False, # 是否输入输出 embedding 权重共享
+    optimize_for_inference = False, # 是否为推理模式优化结构
+):
 ```
 
-#### 前向传播流程
+这里关于 `text_seq_len` 参数和文本词空间的构成需要简单说明一下:
+
+![](DALL-E/4.png)
+
+图像 Token 相关计算:
+
+```python
+    image_size = vae.image_size                     # 输入图像大小（例如 256x256）
+    num_image_tokens = vae.num_tokens               # 图像 token 的词表大小
+    image_fmap_size = (image_size // (2 ** vae.num_layers))  # 编码后 feature map 的大小
+    image_seq_len = image_fmap_size ** 2            # 图像 token 序列长度（flatten 之后）
+```
+> vae.num_layers 是 VAE 编码器中的卷积层个数，每层下采样一次（一般是 stride=2）。 图像经过 VAE 编码器下采样后，特征图的边长 = 原图边长 / 2^层数
+
+> 图像输入经过 VAE 编码后，变成了 image_fmap_size × image_fmap_size 的二维 token map，展平后是 image_seq_len 长度的一维序列，供 Transformer 使用。
+> ![](DALL-E/5.png)
+
+
+文本 token 总数调整（添加 padding token）:
+
+```python
+    num_text_tokens = num_text_tokens + text_seq_len  # 每个位置预留一个特殊 padding token
+```
+
+位置编码设置 :
+
+```python
+    self.text_pos_emb = nn.Embedding(text_seq_len + 1, dim) if not rotary_emb else always(0)
+    # 文本位置编码（+1 是为了 <BOS> token），如果用 rotary 就返回 0
+
+    self.image_pos_emb = AxialPositionalEmbedding(dim, axial_shape=(image_fmap_size, image_fmap_size)) if not rotary_emb else always(0)
+    # 图像使用二维 axial 位置编码（默认）
+```
+保存配置参数 :
+
+```python
+    self.num_text_tokens = num_text_tokens
+    self.num_image_tokens = num_image_tokens
+    self.text_seq_len = text_seq_len
+    self.image_seq_len = image_seq_len
+
+    seq_len = text_seq_len + image_seq_len               # 总序列长度
+    total_tokens = num_text_tokens + num_image_tokens    # 总词表大小
+    self.total_tokens = total_tokens
+    self.total_seq_len = seq_len
+```
+
+冻结 VAE 权重（不参与训练）:
+
+```python
+    self.vae = vae
+    set_requires_grad(self.vae, False)
+```
+
+构造 Transformer 主体 :
+
+```python
+    self.transformer = Transformer(
+        dim = dim,
+        causal = True,                  # 自回归模型
+        seq_len = seq_len,
+        depth = depth,
+        heads = heads,
+        dim_head = dim_head,
+        reversible = reversible,
+        attn_dropout = attn_dropout,
+        ff_dropout = ff_dropout,
+        attn_types = attn_types,
+        image_fmap_size = image_fmap_size,
+        sparse_attn = sparse_attn,
+        stable = stable,
+        sandwich_norm = sandwich_norm,
+        shift_tokens = shift_tokens,
+        rotary_emb = rotary_emb,
+        shared_attn_ids = shared_attn_ids,
+        shared_ff_ids = shared_ff_ids,
+        optimize_for_inference = optimize_for_inference,
+    )
+```
+> 因为为每个 padding 位置保留了唯一 token id，Transformer 不再需要外部的 pad mask。
+
+输出 projection 层（Logits）:
+
+```python
+    self.to_logits = nn.Sequential(
+        nn.LayerNorm(dim),
+        nn.Linear(dim, self.total_tokens),  # 输出维度为整个 text + image 的 token vocab
+    )
+```
+
+构造 token embedding 层（输入）:
+
+```python
+    if share_input_output_emb:
+        # 如果启用权重共享，将 to_logits 的 Linear 拆分作为共享矩阵
+        self.text_emb = SharedEmbedding(self.to_logits[1], 0, num_text_tokens)
+        self.image_emb = SharedEmbedding(self.to_logits[1], num_text_tokens, total_tokens)
+    else:
+        self.text_emb = nn.Embedding(num_text_tokens, dim)
+        self.image_emb = nn.Embedding(num_image_tokens, dim)
+```
+
+构造 Logits Mask:
+
+```python
+    seq_range = torch.arange(seq_len)        # 序列中每个 token 的位置编号（0~seq_len-1）
+    logits_range = torch.arange(total_tokens) # 总词表中的每个 token id（0~total_tokens-1）
+
+    seq_range = rearrange(seq_range, 'n -> () n ()')     # 变成 shape (1, seq_len, 1)
+    logits_range = rearrange(logits_range, 'd -> () () d') # 变成 shape (1, 1, total_tokens)
+
+    logits_mask = (
+        ((seq_range >= text_seq_len) & (logits_range < num_text_tokens)) |
+        ((seq_range < text_seq_len) & (logits_range >= num_text_tokens))
+    )
+    # 如果位置在图像段（text_seq_len之后），却输出 text token → 屏蔽
+    # 如果位置在文本段（text_seq_len之前），却输出 image token → 屏蔽
+
+    self.register_buffer('logits_mask', logits_mask, persistent=False) # 保存 mask 到 buffer（不会被模型训练修改）
+```
+由于文本token和图像token被拼接在一起，作为统一的序列输入Transformer进行编码，
+
+![](DALL-E/6.png)
+
+且文本词空间和图像离散视觉词空间也通过视觉词索引偏移的方式完成了统一，
+
+![](DALL-E/7.png)
+
+因此才有了Transformer可以一次性预测出每个位置对应的Next Token能力，
+
+![](DALL-E/8.png)
+
+但问题就在于属于某个文本Token位置处的预测结果向量中，其反映的实际是整个统一词空间上的概率分布，如果概率最高的那个Token是图像Token，那么就会导致模态混乱了，
+
+![](DALL-E/9.png)
+
+为了解决这个问题，作者引入了 `Logits Mask`  , 如果当前待预测Token位置属于文本词，则将其概率分布中的离散视觉词索引空间对应的概率分布设置为0，
+
+![](DALL-E/10.png)
+
+反之，如果当前待预测Token位置属于离散视觉词，则将其概率分布中的文本词索引空间对应的概率分布设置为0，
+
+![](DALL-E/11.png)
+
+具体来说:
+
+```python
+import torch
+
+# 假设配置
+text_seq_len = 4   # 输入文本序列长度
+image_seq_len = 2  # 每个图像由两个离散视觉token进行表示
+total_seq_len = text_seq_len + image_seq_len # 总输入序列长度
+num_text_tokens = 4 # 文本词表大小
+num_image_tokens = 5 # 离散视觉词表大小
+total_tokens = num_text_tokens + num_image_tokens # 总词表大小
+
+# 构造 logits_mask
+seq_range = torch.arange(total_seq_len).view(1, total_seq_len, 1)
+logits_range = torch.arange(total_tokens).view(1, 1, total_tokens)
+
+logits_mask = ((seq_range >= text_seq_len) & (logits_range < num_text_tokens)) | \
+              ((seq_range < text_seq_len) & (logits_range >= num_text_tokens))
+
+# 将 logits_mask 转为 int 展示（True->1, False->0）
+logits_mask_int = logits_mask.int()[0]  # 只展示第一个 batch 维度
+
+print(logits_mask_int)
+```
+
+输出结果:
+
+```python
+# 前4个位置为文本token，后2个位置为图像token
+tensor([[0, 0, 0, 0, 1, 1, 1, 1, 1], # 对于每个token来说，统一词空间大小为9，其中前4维为词空间索引，后5维为离散视觉词空间索引
+        [0, 0, 0, 0, 1, 1, 1, 1, 1], # 对于文本token，将离散视觉词空间索引对应的概率分布设置为0 (这里设置为1，是为了后续乘上一个最小值)
+        [0, 0, 0, 0, 1, 1, 1, 1, 1],
+        [0, 0, 0, 0, 1, 1, 1, 1, 1],
+
+        [1, 1, 1, 1, 0, 0, 0, 0, 0], # 对于图像token，将文本词索引空间对应的概率分布设置为0 (这里设置为1，是为了后续乘上一个最小值)
+        [1, 1, 1, 1, 0, 0, 0, 0, 0]], dtype=torch.int32)
+```
+
+ 
+### 前向传播流程
+
+上图已经清晰展示了 `DALL·E` 模型的前向传播流程，下面我们通过代码详细来看一下具体实现细节:
+
+1. 随机对输入的文本条件进行 Dropout
 
 ```python
 def forward(
@@ -159,7 +263,10 @@ def forward(
     if null_cond_prob > 0:
         null_mask = prob_mask_like((batch,), null_cond_prob, device=device)
         text *= rearrange(~null_mask, 'b -> b 1')  # 如果 null_mask=True，则整条 text 设为 0（即无条件）
+```
 
+
+```python
     # 将 padding token（0）替换为唯一的 token ID，避免 embedding 冲突
     text_range = torch.arange(self.text_seq_len, device=device) + (self.num_text_tokens - self.text_seq_len)
     text = torch.where(text == 0, text_range, text)
