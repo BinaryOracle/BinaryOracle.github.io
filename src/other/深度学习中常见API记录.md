@@ -383,6 +383,16 @@ greet("Alice")
        return wrapper
    ```
 
+### 地板除 “//” 
+
+`//` 是 **地板除（floor division）** 运算符，表示**向下取整的除法**。
+
+| 表达式      | 结果         | 类型    |
+| -------- | ---------- | ----- |
+| `7 / 3`  | `2.333...` | float |
+| `7 // 3` | `2`        | int   |
+
+
 ## Pytorch
 
 ### stack
@@ -591,6 +601,94 @@ torch.einsum("维度规则", [tensor1, tensor2, ...])
 | `"nc,nc->n"`  | `(q * k).sum(dim=1)`     | (N,)   | 每个 query 与其正样本的点积   |
 | `"nc,ck->nk"` | `torch.matmul(q, queue)` | (N, K) | 每个 query 与所有负样本的相似度 |
 
+### where
+
+```python
+torch.where(condition, x, y)
+```
+
+* `condition`：一个布尔型张量，用来判断条件是否成立。
+
+* 返回一个新张量：
+
+  * **当 `condition` 对应位置为 True 时，取 `x` 中对应位置的元素**；
+
+  * **当 `condition` 对应位置为 False 时，取 `y` 中对应位置的元素**。
+
+### torch.nn.functional.pad
+
+```python
+text = F.pad(text, (1, 0), value=0)
+```
+- text：待填充的张量，比如形状是 (batch_size, seq_len)。
+
+- (1, 0)：指定填充的方式，这里是一个长度为2的元组 (padding_left, padding_right)，表示在最后一个维度的左侧填充1个元素，右侧填充0个元素。
+
+- value=0：用来填充的数值，这里是用0填充。
+
+```python
+    x = torch.tensor([1, 2, 3, 4, 5])
+    print("Original tensor:", x)
+
+    # 在最后一个维度左边填充1个0，右边不填充
+    padded_1 = F.pad(x, (1, 0), value=0)
+    print("Pad (1, 0):", padded_1)
+
+    # 在最后一个维度左边不填充，右边填充2个9
+    padded_2 = F.pad(x, (0, 2), value=9)
+    print("Pad (0, 2) with 9:", padded_2)
+
+    # 在最后一个维度两边各填充2个-1
+    padded_3 = F.pad(x, (2, 2), value=-1)
+    print("Pad (2, 2) with -1:", padded_3)
+```
+
+output:
+
+```python
+Original tensor: tensor([1, 2, 3, 4, 5])
+Pad (1, 0): tensor([0, 1, 2, 3, 4, 5])
+Pad (0, 2) with 9: tensor([1, 2, 3, 4, 5, 9, 9])
+Pad (2, 2) with -1: tensor([-1, -1,  1,  2,  3,  4,  5, -1, -1])
+```
+
+### rearrange
+
+rearrange 是一个来自 einops（Einstein Operations）库的函数，用于对张量（Tensor）进行灵活、直观的重排、维度变换、转置、扩展等操作。
+
+```python
+from einops import rearrange
+
+output = rearrange(tensor, pattern)
+```
+
+- tensor 是输入张量。
+
+- pattern 是一个字符串，描述输入和输出维度的对应关系，类似模式匹配。
+
+```python
+rearrange(x, 'b c h w -> b h w c')  # 交换维度顺序
+
+x = torch.randn(4)  # shape (4,)
+y = rearrange(x, 'b -> b 1')  # 变成 (4,1)，增加一个维度
+
+x = torch.randn(2, 3, 4)
+y = rearrange(x, 'b c d -> b (c d)')  # 把c和d合并成一个维度
+
+x = torch.randn(2, 12)
+y = rearrange(x, 'b (c d) -> b c d', c=3)  # 把12拆分成3和4
+```
+
+### Tensor.uniform_
+
+```python
+Tensor.uniform_(from=0, to=1)
+```
+1. 把一个 已有的张量，用 均匀分布随机数填充。
+
+2. 生成的值在 [from, to) 范围内，默认是 [0, 1)。
+
+3. 加上 _ 说明是原地修改：直接在原张量上进行操作，不创建新张量。
 
 ## 模型
 
