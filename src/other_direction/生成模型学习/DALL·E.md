@@ -761,3 +761,4 @@ def generate_texts(
     # 返回 token 序列和解码后的文本
     return text_tokens, texts
 ```
+
