@@ -983,4 +983,119 @@ def decode(
 
     return images
 ```
+### 生成质量判别器: CLIP
+
+我们可以借助预训练好的CLIP模型，作为图文匹配的判别器，以此来评判DALL-E模型的文生图质量:
+
+```python
+class CLIP(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim_text = 512,                 # 文本嵌入维度
+        dim_image = 512,                # 图像嵌入维度
+        dim_latent = 512,               # 公共对齐空间的维度（用于计算相似度）
+        num_text_tokens = 10000,        # 文本词表大小
+        text_enc_depth = 6,             # 文本 Transformer 层数
+        text_seq_len = 256,             # 文本序列最大长度
+        text_heads = 8,                 # 文本 Transformer 头数
+        num_visual_tokens = 512,        # 图像 patch token 数（未使用）
+        visual_enc_depth = 6,           # 图像 Transformer 层数
+        visual_heads = 8,               # 图像 Transformer 头数
+        visual_image_size = 256,        # 输入图像尺寸
+        visual_patch_size = 32,         # patch 尺寸
+        channels = 3                    # 图像通道数
+    ):
+        super().__init__()
+
+        # --- 文本编码器 ---
+        self.text_emb = nn.Embedding(num_text_tokens, dim_text)                  # 文本 token embedding
+        self.text_pos_emb = nn.Embedding(text_seq_len, dim_text)                # 文本位置 embedding
+        self.text_transformer = Transformer(
+            causal = False,
+            seq_len = text_seq_len,
+            dim = dim_text,
+            depth = text_enc_depth,
+            heads = text_heads,
+            rotary_emb = False
+        )
+        self.to_text_latent = nn.Linear(dim_text, dim_latent, bias = False)     # 映射到公共 latent 空间
+
+        # --- 图像编码器 ---
+        assert visual_image_size % visual_patch_size == 0, 'Image dimensions must be divisible by the patch size.'
+        num_patches = (visual_image_size // visual_patch_size) ** 2             # 图像中 patch 的数量
+        patch_dim = channels * visual_patch_size ** 2                           # 每个 patch 的展平维度
+
+        self.visual_patch_size = visual_patch_size
+        self.to_visual_embedding = nn.Linear(patch_dim, dim_image)              # 将 patch 嵌入图像 token 空间
+        self.visual_pos_emb = nn.Embedding(num_patches, dim_image)              # 图像 patch 的位置 embedding
+        self.visual_transformer = Transformer(
+            causal = False,
+            seq_len = num_patches,
+            dim = dim_image,
+            depth = visual_enc_depth,
+            heads = visual_heads,
+            rotary_emb = False
+        )
+        self.to_visual_latent = nn.Linear(dim_image, dim_latent, bias = False)  # 映射到公共 latent 空间
+
+        # 温度参数（可学习，用于缩放余弦相似度）
+        self.temperature = nn.Parameter(torch.tensor(1.))
+
+    def forward(
+        self,
+        text,               # 输入文本，shape: [B, T]
+        image,              # 输入图像，shape: [B, C, H, W]
+        text_mask = None,   # 文本掩码（用于处理 padding）
+        return_loss = False # 是否返回对比损失（训练阶段）
+    ):
+        b, device, p = text.shape[0], text.device, self.visual_patch_size
+
+        # --- 文本编码 ---
+        text_emb = self.text_emb(text)                                             # 文本 token embedding
+        text_emb += self.text_pos_emb(torch.arange(text.shape[1], device = device))  # 加上位置 embedding
+        enc_text = self.text_transformer(text_emb, mask = text_mask)               # 经过 Transformer 编码
+
+        # --- 图像编码 ---
+        # 将图像切分为 patch，并展平每个 patch
+        image_patches = rearrange(image, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = p, p2 = p)
+        image_emb = self.to_visual_embedding(image_patches)                        # 线性映射为 patch embedding
+        image_emb += self.visual_pos_emb(torch.arange(image_emb.shape[1], device = device))  # 加位置 embedding
+        enc_image = self.visual_transformer(image_emb)                             # 图像 Transformer 编码
+
+        # --- 获取图文 latent 表示 ---
+        # 文本 latent: 取平均或 masked average（忽略 padding）
+        if exists(text_mask):
+            text_latents = masked_mean(enc_text, text_mask, dim = 1)
+        else:
+            text_latents = enc_text.mean(dim = 1)
+
+        # 图像 latent: 直接平均所有 patch token
+        image_latents = enc_image.mean(dim = 1)
+
+        # 映射到公共 latent 空间
+        text_latents = self.to_text_latent(text_latents)
+        image_latents = self.to_visual_latent(image_latents)
+
+        # 对 latent 向量进行归一化（L2），以便计算余弦相似度
+        text_latents, image_latents = map(lambda t: F.normalize(t, p = 2, dim = -1), (text_latents, image_latents))
+
+        # 计算可学习温度值（以提升相似度分布的差异性）
+        temp = self.temperature.exp()
+
+        if not return_loss:
+            # 推理模式下，计算每对 text-image 的相似度（点积 * 温度）
+            sim = einsum('n d, n d -> n', text_latents, image_latents) * temp
+            return sim
+
+        # 训练模式下，计算所有样本之间的相似度矩阵（用于对比损失）
+        sim = einsum('i d, j d -> i j', text_latents, image_latents) * temp
+
+        # 构建标签，正样本在对角线（i==j）
+        labels = torch.arange(b, device = device)
+
+        # 双向对比损失：text -> image 和 image -> text，平均两个方向的 cross entropy
+        loss = (F.cross_entropy(sim, labels) + F.cross_entropy(sim.t(), labels)) / 2
+        return loss
+```
 
