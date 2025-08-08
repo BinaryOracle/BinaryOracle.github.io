@@ -761,4 +761,226 @@ def generate_texts(
     # 返回 token 序列和解码后的文本
     return text_tokens, texts
 ```
+### DiscreteVAE 离散化变分自编码器
+
+从本节开始，我们将快速过一下 `DiscreteVAE` 离散化变分自编码器 和 `CLIP` 模型的代码实现。
+
+> 本节开始为扩展阅读内容，已有前置知识的同学，可以选择跳过。
+
+首先来看一下 `DiscreteVAE` 的初始化方法:
+
+```python
+class DiscreteVAE(nn.Module):
+    def __init__(
+        self,
+        image_size = 256,                # 输入图像尺寸（宽高），要求是 2 的幂
+        num_tokens = 512,                # codebook 中的 token 数量（离散表示空间的大小）
+        codebook_dim = 512,             # codebook 中每个向量的维度
+        num_layers = 3,                 # 编码器 / 解码器的层数（每层是一次下采样或上采样）
+        num_resnet_blocks = 0,         # 残差块的数量（用于提升表达能力）
+        hidden_dim = 64,               # 编码器 / 解码器中卷积通道的基础维度
+        channels = 3,                  # 图像通道数（RGB = 3）
+        smooth_l1_loss = False,        # 是否使用 Smooth L1 损失（否则使用 MSE）
+        temperature = 0.9,             # Gumbel Softmax 温度，控制离散采样的平滑程度
+        straight_through = False,     # 是否使用 straight-through estimator（用于反向传播离散 token）
+        reinmax = False,              # 是否使用 Reinmax（一种用于离散变量的采样技术）
+        kl_div_loss_weight = 0.,      # KL 散度损失的权重（通常为 0 或很小）
+        normalization = ((*((0.5,) * 3), 0), (*((0.5,) * 3), 1))  # 图像标准化参数
+    ):
+        super().__init__()
+        assert log2(image_size).is_integer(), 'image size must be a power of 2'
+        assert num_layers >= 1, 'number of layers must be greater than or equal to 1'
+        has_resblocks = num_resnet_blocks > 0
+
+        self.channels = channels
+        self.image_size = image_size
+        self.num_tokens = num_tokens
+        self.num_layers = num_layers
+        self.temperature = temperature
+        self.straight_through = straight_through
+        self.reinmax = reinmax
+
+        # codebook：token_id 到向量的映射，大小为 (num_tokens, codebook_dim)
+        self.codebook = nn.Embedding(num_tokens, codebook_dim)
+
+        hdim = hidden_dim
+
+        # 构造编码器与解码器的通道列表（每层的通道数）
+        enc_chans = [hidden_dim] * num_layers
+        dec_chans = list(reversed(enc_chans))  # 解码器通道反转
+
+        enc_chans = [channels, *enc_chans]  # 编码器输入通道从图像开始
+
+        # 如果有残差块，解码器第一层输入通道来自 ResBlock 输出
+        dec_init_chan = codebook_dim if not has_resblocks else dec_chans[0]
+        dec_chans = [dec_init_chan, *dec_chans]
+
+        # 形如 [(in1, out1), (in2, out2), ...]
+        enc_chans_io, dec_chans_io = map(lambda t: list(zip(t[:-1], t[1:])), (enc_chans, dec_chans))
+
+        enc_layers = []  # 编码器网络层列表
+        dec_layers = []  # 解码器网络层列表
+
+        # 构建编码器和解码器的每一层（卷积 / 转置卷积 + ReLU）
+        for (enc_in, enc_out), (dec_in, dec_out) in zip(enc_chans_io, dec_chans_io):
+            enc_layers.append(
+                nn.Sequential(nn.Conv2d(enc_in, enc_out, kernel_size=4, stride=2, padding=1), nn.ReLU())
+            )
+            dec_layers.append(
+                nn.Sequential(nn.ConvTranspose2d(dec_in, dec_out, kernel_size=4, stride=2, padding=1), nn.ReLU())
+            )
+
+        # 添加 ResBlock（如果有）
+        for _ in range(num_resnet_blocks):
+            dec_layers.insert(0, ResBlock(dec_chans[1]))             # 解码器最前面插入 ResBlock
+            enc_layers.append(ResBlock(enc_chans[-1]))               # 编码器末尾追加 ResBlock
+
+        # 如果使用 ResBlock，还需要额外将 codebook_dim 映射到 decoder 通道数
+        if num_resnet_blocks > 0:
+            dec_layers.insert(0, nn.Conv2d(codebook_dim, dec_chans[1], kernel_size=1))
+
+        # 编码器最终输出 token logits，维度是 num_tokens（注意：非 softmax）
+        enc_layers.append(nn.Conv2d(enc_chans[-1], num_tokens, kernel_size=1))
+
+        # 解码器最终输出图像，维度是原始图像的通道数
+        dec_layers.append(nn.Conv2d(dec_chans[-1], channels, kernel_size=1))
+
+        # 打包成 nn.Sequential 模块
+        self.encoder = nn.Sequential(*enc_layers)
+        self.decoder = nn.Sequential(*dec_layers)
+
+        # 设置重建损失函数：MSE 或 Smooth L1
+        self.loss_fn = F.smooth_l1_loss if smooth_l1_loss else F.mse_loss
+
+        self.kl_div_loss_weight = kl_div_loss_weight  # KL损失的权重（可用于 soft quantization）
+
+        # 图像标准化（mean, std），用于输入预处理
+        self.normalization = tuple(map(lambda t: t[:channels], normalization))
+```
+
+下面给出 `DiscreteVAE` 的 `forward` 方法：
+
+```python
+def forward(
+    self,
+    img,                      # 输入图像，形状为 (B, C, H, W)
+    return_loss = False,     # 是否返回损失（训练时设为 True）
+    return_recons = False,   # 是否返回重建图像（可用于可视化对比）
+    return_logits = False,   # 是否返回 token logits（DALL·E 训练时提取 token 用）
+    temp = None              # 温度参数，用于 Gumbel-Softmax，控制采样平滑程度
+):
+    device = img.device
+    num_tokens = self.num_tokens
+    image_size = self.image_size
+    kl_div_loss_weight = self.kl_div_loss_weight
+
+    # 图像尺寸检查
+    assert img.shape[-1] == image_size and img.shape[-2] == image_size, f'input must have the correct image size {image_size}'
+
+    # 归一化输入图像（和训练时保持一致）
+    img = self.norm(img)
+
+    # 编码器输出 logits，形状为 (B, num_tokens, H/2^L, W/2^L)
+    logits = self.encoder(img)
+
+    # 若仅需要 token logits（比如训练 DALL·E 时获取离散 token）
+    if return_logits:
+        return logits
+
+    # 采样温度参数：如果没传入，就用默认的 self.temperature
+    temp = default(temp, self.temperature)
+
+    # Gumbel Softmax 采样：输出 one-hot 向量或 soft one-hot（取决于 straight_through）
+    one_hot = F.gumbel_softmax(logits, tau = temp, dim = 1, hard = self.straight_through)
+
+    # Reinmax（改进的 straight-through Gumbel Softmax）逻辑
+    if self.straight_through and self.reinmax:
+        # Reinmax 来自 https://arxiv.org/abs/2304.08612，增强采样精度
+        # 论文算法2实现
+
+        one_hot = one_hot.detach()  # 不反向传播梯度
+
+        π0 = logits.softmax(dim = 1)  # 原始 softmax 分布
+        π1 = (one_hot + (logits / temp).softmax(dim = 1)) / 2  # 平均分布
+        π1 = ((log(π1) - logits).detach() + logits).softmax(dim = 1)  # 加入梯度修正
+        π2 = 2 * π1 - 0.5 * π0  # Reinmax 分布
+        one_hot = π2 - π2.detach() + one_hot  # 将梯度传递给 one_hot
+
+    # 将 one-hot 与 codebook 进行矩阵乘法，获取嵌入向量图（图像 latent 表示）
+    # einsum: b (token) h w, token d -> b d h w
+    sampled = einsum('b n h w, n d -> b d h w', one_hot, self.codebook.weight)
+
+    # 解码器将 latent 表示还原为图像
+    out = self.decoder(sampled)
+
+    # 如果不需要返回 loss，直接返回解码图像
+    if not return_loss:
+        return out
+
+    # 计算重建损失（MSE 或 Smooth L1）
+    recon_loss = self.loss_fn(img, out)
+
+    # KL 散度部分（用于将 token 分布逼近 uniform）
+    # logits shape: (B, num_tokens, H, W) -> (B, HW, num_tokens)
+    logits = rearrange(logits, 'b n h w -> b (h w) n')
+    log_qy = F.log_softmax(logits, dim = -1)  # q(y|x)：预测分布
+    log_uniform = torch.log(torch.tensor([1. / num_tokens], device = device))  # p(y) ~ U
+    kl_div = F.kl_div(log_uniform, log_qy, None, None, 'batchmean', log_target = True)
+
+    # 总损失 = 重建损失 + KL散度损失（可选）
+    loss = recon_loss + (kl_div * kl_div_loss_weight)
+
+    # 如果不需要重建图像，直接返回 loss
+    if not return_recons:
+        return loss
+
+    # 否则返回损失 + 解码图像
+    return loss, out
+```
+> 关于本部分代码细节的详细解释，可以参考之前这篇文章: [BEiT 模型代码解读](https://binaryoracle.github.io/other_direction/%E7%94%9F%E6%88%90%E6%A8%A1%E5%9E%8B%E5%AD%A6%E4%B9%A0/BEiT%E6%A8%A1%E5%9E%8B%E4%BB%A3%E7%A0%81%E8%A7%A3%E8%AF%BB.html)
+
+DALL-E 模型使用的是训练好的 `DiscreteVAE` , 其中我们最常使用 `get_codebook_indices` 方法获取输入图像对应的离散视觉 token 索引。
+
+```python
+@torch.no_grad()  # 禁用梯度计算（推理模式，提高效率，节省显存）
+@eval_decorator    # 将模型暂时设为 eval 模式（关闭 Dropout、BatchNorm 的动效）
+def get_codebook_indices(self, images):
+    # 编码器 + projection，得到每个位置对应的 logits（未 softmax）
+    # logits 形状: (B, num_tokens, H', W')，H'=W'=原图尺寸 / 2^L
+    logits = self(images, return_logits = True)
+
+    # 取最大概率的 token 索引：在 dim=1（token 类别维）上 argmax
+    # 得到形状: (B, H', W')，即每个图像中每个 patch 的 token 索引
+    codebook_indices = logits.argmax(dim = 1).flatten(1)  
+    # flatten(1): 将 (B, H', W') 展平为 (B, H'*W')，方便后续处理
+
+    return codebook_indices
+```
+
+其次我们会调用 `decode` 方法实现从离散视觉Token索引到图像的重建过程:
+
+```python
+def decode(
+    self,
+    img_seq  # 输入图像的离散 token 序列，形状：(B, N)
+):
+    # 通过 codebook 查表，把每个 token 转换为向量（embedding）
+    # image_embeds 形状: (B, N, D)
+    image_embeds = self.codebook(img_seq)
+
+    # 获取维度信息：B 批次大小，N token 个数，D embedding 维度
+    b, n, d = image_embeds.shape
+
+    # 假设图像是正方形的，N = H' × W'，计算边长
+    h = w = int(sqrt(n))
+
+    # 重新排列：从 (B, N, D) 转换为 (B, D, H', W')，用于 ConvTranspose 解码
+    image_embeds = rearrange(image_embeds, 'b (h w) d -> b d h w', h = h, w = w)
+
+    # 解码还原图像：使用 Decoder（转置卷积等）
+    # 输出图像形状: (B, C, H, W)
+    images = self.decoder(image_embeds)
+
+    return images
+```
 
