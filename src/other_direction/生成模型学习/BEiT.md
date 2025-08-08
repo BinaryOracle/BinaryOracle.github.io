@@ -2,9 +2,9 @@
 title: BEiT 论文
 icon: file
 category:
-  - 多模态
+  - 生成模型
 tag:
-  - 多模态
+  - 生成模型
   - 已发布
 footer: 技术共建，知识共享
 date: 2025-08-02

@@ -1,18 +1,18 @@
 ---
-title: DALL·E 论文
+title: DALL·E 模型代码解读
 icon: file
 category:
-  - 多模态
+  - 生成模型
 tag:
-  - 多模态
+  - 生成模型
   - 编辑中
 footer: 技术共建，知识共享
-date: 2025-08-04
+date: 2025-08-08
 author:
   - BinaryOracle
 ---
 
-`DALL·E 论文` 
+`DALL·E 模型代码解读` 
 
 <!-- more -->
 
