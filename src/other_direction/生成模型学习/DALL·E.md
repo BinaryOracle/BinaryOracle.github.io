@@ -443,3 +443,161 @@ $$
 * 除以后 loss 规模 ≈ $\frac{1}{8}\text{loss\_text} + \frac{7}{8}\text{loss\_img}$，整体仍在合理区间
 
 > **通过给图像损失设置更高的权重，平衡文本和图像两部分的训练目标，同时保持总损失数值稳定。**
+
+### Classifier-Free Guidance（无条件引导技术）
+
+Classifier-Free Guidance（CFG）本质上是一种“在同一个模型内部做有条件与无条件两种预测，然后按比例混合”以强化条件信号的方法。它的核心思想可以分为三个步骤：
+
+1. **无条件预测**
+
+   令模型忽略输入的条件（例如将 `null_cond_prob=1.0`），只靠自身学到的“图像先验”去预测下一个 token／像素。输出我们记作
+
+   $$
+     \text{logits}_{\text{uncond}}.
+   $$
+
+2. **有条件预测**
+
+   再次用原始的条件（如文本描述）去预测，得到
+
+   $$
+     \text{logits}_{\text{cond}}.
+   $$
+
+3. **线性混合强化**
+
+   将两者按下式混合：
+
+   $$
+     \text{logits}_{\text{guided}}
+     = \text{logits}_{\text{uncond}}
+       + s\;\bigl(\text{logits}_{\text{cond}} - \text{logits}_{\text{uncond}}\bigr)
+   $$
+
+   其中 $s$（`cond_scale`）是一个大于 1 的放大系数。这样做的意义在于：
+
+   * $\text{logits}_{\text{cond}} - \text{logits}_{\text{uncond}}$ 正好捕捉了“条件对输出的额外影响”，
+   
+   * 放大这个差值就能让模型更“听话”地跟随条件（例如更准确地按照提示文本生成图像），
+   
+   * 而基础的“无条件”部分保证了生成的多样性与样本质量。
+
+为什么它能工作？
+
+* **单模型实现**：不需要额外训练一个对比判别器或辅助网络，只利用模型自身“有条件/无条件”两种模式。
+
+* **稳定平衡**：$s=1$ 时退化为普通有条件生成；$s>1$ 时增强条件影响；如果条件本身模糊，过大 $s$ 会丧失多样性。
+
+* **实际效果**：在图像或序列生成任务中，CFG 能显著提升条件相关性（如文本与生成图像的紧密契合度），同时保留一定的随机性和自然度。
+
+这种技术被广泛应用于扩散模型、Transformer-based 自回归模型（如 DALL·E）等条件生成场景，是当前最简单、最高效的“无判别器”引导方法。
+
+具体代码实现过程如下:
+
+```python
+    def forward_with_cond_scale(self, *args, cond_scale = 1, cache = None, **kwargs):
+        if cond_scale == 1:
+            return self(*args, **kwargs)
+
+        prev_cache = cache.copy() if exists(cache) else None
+        logits = self(*args, cache = cache, **kwargs)
+
+        # discovery by Katherine Crowson
+        # https://twitter.com/RiversHaveWings/status/1478093658716966912
+        null_cond_logits = self(*args, null_cond_prob = 1., cache = prev_cache, **kwargs)
+        return null_cond_logits + (logits - null_cond_logits) * cond_scale
+```
+
+### 生成图像
+
+
+```python
+@torch.no_grad()  # 不计算梯度，用于推理模式，节省显存
+@eval_decorator  # 将模型切换到 eval 模式（如关闭 dropout、norm 统计冻结等），确保一致性
+def generate_images(
+    self,
+    text,                      # 输入的文本 token 序列（已经 embed 好的 token id）
+    *,
+    clip = None,               # 可选：用于对生成图像进行 CLIP 打分的模型
+    filter_thres = 0.5,        # Top-k 采样时的阈值，控制生成 token 的多样性
+    temperature = 1.,          # Gumbel softmax 的温度参数，控制采样随机性
+    img = None,                # 可选：用于 image priming 的起始图像
+    num_init_img_tokens = None,# 用于 priming 的起始 image token 数量
+    cond_scale = 1.,           # CFG 强化系数（1 表示不强化）
+    use_cache = False,         # 是否启用 KV 缓存加速
+):
+    # 一些常用变量的引用
+    vae, text_seq_len, image_seq_len, num_text_tokens = (
+        self.vae, self.text_seq_len, self.image_seq_len, self.num_text_tokens
+    )
+    total_len = text_seq_len + image_seq_len  # 整个序列的总长度
+
+    text = text[:, :text_seq_len]  # 限制输入文本长度不超过最大 text_seq_len
+    out = text                     # 初始化输出 token 序列
+
+    # --------------------------
+    # Optional: 图像 priming
+    # --------------------------
+    if exists(img):
+        image_size = vae.image_size
+        assert img.shape[1:] == (3, image_size, image_size), \
+            f'input image must have the correct image size {image_size}'
+
+        # 编码图像为 VQ token 序列
+        indices = vae.get_codebook_indices(img)
+
+        # 默认采样前 14 × 32 = 448 个图像 token（约占 43.75%）
+        num_img_tokens = default(num_init_img_tokens, int(0.4375 * image_seq_len))
+        assert num_img_tokens < image_seq_len, 'priming token 数不能超过图像 token 总长度'
+
+        # 仅使用前 num_img_tokens 个 image token 来进行条件 priming
+        indices = indices[:, :num_img_tokens]
+
+        # 将这些图像 token 拼接到文本后面作为起始序列
+        out = torch.cat((out, indices), dim = -1)
+
+    # --------------------------
+    # 生成 token 序列（从起始长度到 total_len）
+    # --------------------------
+    prev_cache = None
+    cache = {} if use_cache else None  # KV 缓存机制（可加速 transformer 推理）
+
+    for cur_len in range(out.shape[1], total_len):
+        is_image = cur_len >= text_seq_len  # 当前 token 属于图像部分
+
+        # 每一步构造 text / image token 序列（注意有 padding）
+        text, image = out[:, :text_seq_len], out[:, text_seq_len:]
+
+        # 使用 CFG 技术进行条件引导预测 logits
+        logits = self.forward_with_cond_scale(text, image, cond_scale=cond_scale, cache=cache)
+
+        # 取当前时间步（只关心最后一个 token 的 logits）
+        logits = logits[:, -1, :]
+
+        # top-k 采样（过滤掉概率低的 token）
+        filtered_logits = top_k(logits, thres=filter_thres)
+
+        # 使用 gumbel softmax 进行随机采样，得到一个 token id
+        sample = gumbel_sample(filtered_logits, temperature=temperature, dim=-1)
+
+        # 如果是 image token，需要减去偏移（因为 logit 空间 = [text_vocab, image_vocab]）
+        sample -= (num_text_tokens if is_image else 0)
+
+        # 拼接新生成的 token
+        out = torch.cat((out, sample[:, None]), dim=-1)
+
+    # 拆分输出序列
+    text_seq = out[:, :text_seq_len]               # 最终文本 token 序列
+    img_seq = out[:, -image_seq_len:]              # 最终图像 token 序列（后 image_seq_len 个）
+
+    # 解码图像 token 为实际图片
+    images = vae.decode(img_seq)
+
+    # 若提供了 CLIP，则使用其打分
+    if exists(clip):
+        scores = clip(text_seq, images, return_loss=False)
+        return images, scores
+
+    return images
+```
+
