@@ -508,7 +508,7 @@ Classifier-Free Guidance（CFG）本质上是一种“在同一个模型内部�
         return null_cond_logits + (logits - null_cond_logits) * cond_scale
 ```
 
-### 推理过程: 图文联合生成
+### 推理过程: 图文联合生成图像
 
 DALL-E 的推理过程实际执行过程中，不仅可以传入文本条件，还可以传入初始图像条件，从而实现图文联合生成 (text + image condition) , 具体代码实现如下:
 
@@ -675,3 +675,89 @@ def gumbel_sample(t, temperature=1., dim=-1):
   * 趋近 ∞ → 更加随机，平滑采样。
 
 * `gumbel_noise` 的加入使得采样变为“有噪声的 argmax”，而不是简单地选最大值。
+
+### “语言建模能力”的回溯性验证
+
+`DALL·E` 是一个 `文本-图像联合建模（joint modeling）` 的 Transformer：
+
+1. 它的输入是 `text_tokens + image_tokens` 拼接而成的序列；
+
+2. 输出是对整个序列的预测（自回归建模）；
+
+3. 模型头部输出 logits，既可用于预测文本 token，也可用于预测图像 token。
+
+`generate_texts` 方法就是在 `复用这个模型的 text 生成能力`，可以视作：
+
+🔸 “测试 DALL·E 是否真正学会了语言建模部分”，
+
+🔸 “是否理解 prompt 的语言结构”。
+
+```python
+@torch.no_grad()  # 表示该函数中不进行梯度计算，节省内存，提高推理效率
+@eval_decorator   # 将模型设置为 evaluation 模式，禁用 dropout 等训练行为
+def generate_texts(
+    self,
+    tokenizer,               # 分词器对象，用于将输入文本编码为 token 序列
+    text = None,             # 输入文本（可为空字符串）
+    *,
+    filter_thres = 0.5,      # top-k 采样的阈值，控制保留多少 logits 值
+    temperature = 1.         # Gumbel Softmax 的温度系数，调节随机性
+):
+    text_seq_len = self.text_seq_len  # 设定文本序列的最大长度（固定）
+
+    # 如果没有输入文本，默认从 token_id 为 0 的 token 开始（如 [BOS]）
+    if text is None or text == "":
+        text_tokens = torch.tensor([[0]]).cuda()
+    else:
+        # 编码输入文本为 token 序列，并添加 batch 维度
+        text_tokens = torch.tensor(tokenizer.tokenizer.encode(text)).cuda().unsqueeze(0)
+
+    # 自回归生成，逐 token 采样直到达到目标长度
+    for _ in range(text_tokens.shape[1], text_seq_len):
+        device = text_tokens.device
+
+        # 获取 token 的嵌入向量
+        tokens = self.text_emb(text_tokens)
+
+        # 添加位置编码（相对或绝对），保持 token 顺序感知
+        tokens += self.text_pos_emb(torch.arange(text_tokens.shape[1], device=device))
+
+        seq_len = tokens.shape[1]  # 当前序列长度
+
+        # 送入 Transformer 模型获取输出（每个位置的表征）
+        output_transf = self.transformer(tokens)
+
+        # 如果开启了 stable 模式，则归一化输出，避免极端数值
+        if self.stable:
+            output_transf = self.norm_by_max(output_transf)
+
+        # 映射至 logits（预测下一个 token 的概率分布）
+        logits = self.to_logits(output_transf)
+
+        # 屏蔽非法的预测位置：
+        # 确保在生成文本的阶段，只能预测文本 token，而不是图像 token
+        logits_mask = self.logits_mask[:, :seq_len]
+        max_neg_value = -torch.finfo(logits.dtype).max
+        logits.masked_fill_(logits_mask, max_neg_value)
+
+        # 仅取最后一个位置的 logits（用于下一个 token 的采样）
+        logits = logits[:, -1, :]
+
+        # top-k 过滤：仅保留最可能的 k 个 logits，其余设置为 -inf
+        filtered_logits = top_k(logits, thres=filter_thres)
+
+        # 使用 Gumbel Softmax 技术从过滤后的 logits 中采样一个 token
+        sample = gumbel_sample(filtered_logits, temperature=temperature, dim=-1)
+
+        # 将采样到的新 token 拼接到已有序列后
+        text_tokens = torch.cat((text_tokens, sample[:, None]), dim=-1)
+
+    # 构建 padding token 的集合，用于后续解码时跳过填充 token
+    padding_tokens = set(np.arange(self.text_seq_len) + (self.num_text_tokens - self.text_seq_len))
+
+    # 将 token 序列解码为可读文本，自动去掉 padding token
+    texts = [tokenizer.tokenizer.decode(text_token, pad_tokens=padding_tokens) for text_token in text_tokens]
+
+    # 返回 token 序列和解码后的文本
+    return text_tokens, texts
+```
