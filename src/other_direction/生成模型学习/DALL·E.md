@@ -243,7 +243,7 @@ tensor([[0, 0, 0, 0, 1, 1, 1, 1, 1], # 对于每个token来说，统一词空间
  
 ### 前向传播流程
 
-上图已经清晰展示了 `DALL·E` 模型的前向传播流程，下面我们通过代码详细来看一下具体实现细节:
+本节最开始给出的前向传播流程图已经清晰展示了 `DALL·E` 模型的前向传播流程，下面我们通过代码详细来看一下具体实现细节:
 
 1. 随机对输入的文本条件进行 Dropout
 
@@ -264,22 +264,52 @@ def forward(
         null_mask = prob_mask_like((batch,), null_cond_prob, device=device)
         text *= rearrange(~null_mask, 'b -> b 1')  # 如果 null_mask=True，则整条 text 设为 0（即无条件）
 ```
+> ```python
+>   def prob_mask_like(shape, prob, device):
+>       return torch.zeros(shape, device = device).float().uniform_(0, 1) < prob
+> ```   
 
+DALL·E 的目标不是只会“根据文本生成图像”，还希望它能：
+
+1. 有条件生成（text → image）
+
+2. 无条件生成（随机 → image）
+
+通过让一部分样本在训练时不给文本输入，让模型也能学到“如何仅靠图像生成图像”。
+
+--- 
+
+2. 为每一个padding token分配一个唯一的词索引
 
 ```python
-    # 将 padding token（0）替换为唯一的 token ID，避免 embedding 冲突
+    # self.num_text_tokens - self.text_seq_len 是计算 padding token 在文本词索引空间中的起始索引
     text_range = torch.arange(self.text_seq_len, device=device) + (self.num_text_tokens - self.text_seq_len)
-    text = torch.where(text == 0, text_range, text)
+    text = torch.where(text == 0, text_range, text) # 将 padding token 替换为唯一的 token ID
+```
 
+---
+
+3. 文本序列开头加上 `<bos> token` , 作为自回归预测的开始标志
+
+```python
     # 在文本序列开头加上 <bos> token（值为0）
     text = F.pad(text, (1, 0), value=0)
+```
+---
 
+4. 文本 token embedding 与 位置编码
+
+```python
     # 文本 token embedding 与位置编码
     tokens = self.text_emb(text)
     tokens += self.text_pos_emb(torch.arange(text.shape[1], device=device))
-
     seq_len = tokens.shape[1]  # 当前 token 序列长度（仅包含文本部分）
+```
+--- 
 
+5. 输入图像编码为离散的视觉Token，视觉Token embedding 与 位置编码 ，最后与文本Token embedding 拼接，作为送入 Transformer 的输入
+
+```python
     # 如果输入了图像（且非空），处理图像 embedding
     if exists(image) and not is_empty(image):
         is_raw_image = len(image.shape) == 4  # 如果是原始图像（B, C, H, W）
@@ -291,7 +321,7 @@ def forward(
             assert tuple(image.shape[1:]) == (channels, image_size, image_size), \
                 f'invalid image of dimensions {image.shape} passed in during training'
 
-            # 使用 VAE 将原始图像编码为离散 codebook indices
+            # 使用 VAE 将原始图像编码为离散 codebook indices (after flatten)
             image = self.vae.get_codebook_indices(image)
 
         image_len = image.shape[1]
@@ -301,7 +331,12 @@ def forward(
         # 将文本和图像的 embedding 拼接
         tokens = torch.cat((tokens, image_emb), dim=1)
         seq_len += image_len  # 更新总长度
+```
+---
 
+6.  "右移": 删除序列最后一个token，因为其不参与Next Token Prediction；(训练优化Trick不进行讲解)
+
+```python
     # 如果 token 总长度超过模型最大长度，则裁剪掉最后一个 token（训练时末尾 token 不需要预测）
     if tokens.shape[1] > total_seq_len:
         seq_len -= 1
@@ -318,7 +353,12 @@ def forward(
 
     # 送入 transformer 主体
     out = self.transformer(tokens, cache=cache)
+```
+---
 
+7. 投影到统一词空间，应用 logits mask ，防止跨模态预测
+
+```python
     # 如果启用了稳定策略，对输出做归一化
     if self.stable:
         out = self.norm_by_max(out)
@@ -332,7 +372,12 @@ def forward(
         logits_mask = logits_mask[:, -1:]
     max_neg_value = -torch.finfo(logits.dtype).max  # -inf 替代值
     logits.masked_fill_(logits_mask, max_neg_value)  # 用 -inf 屏蔽不合法预测
+```
+---
 
+8. 是否提前中断返回 logits
+
+```python
     # 更新 KV Cache 的偏移量（用于增量推理）
     if exists(cache):
         cache['offset'] = cache.get('offset', 0) + logits.shape[1]
@@ -340,7 +385,13 @@ def forward(
     # 如果不要求计算损失，直接返回 logits
     if not return_loss:
         return logits
+```
 
+--- 
+
+9. 计算文本token和视觉token预测结果与原Label的交叉熵损失
+
+```python
     # 训练时必须提供图像（否则无法计算图像 token 的预测损失）
     assert exists(image), 'when training, image must be supplied'
 
@@ -364,3 +415,31 @@ def forward(
 
     return loss
 ```
+
+![](DALL-E/12.png)
+
+在 DALL·E 的训练中，文本 token 和图像 token 的数量差别很大（通常图像 token 远多于文本 token），如果直接把它们的交叉熵损失简单相加，图像部分的 loss 会“淹没”文本部分，导致模型过度关注图像而忽视文本。为了解决这个不平衡问题，DALL·E 在合并两部分损失时引入了一个 **图像损失权重** `self.loss_img_weight`（通常设置为 7），具体做法如下：
+
+```python
+loss = (loss_text + self.loss_img_weight * loss_img) / (self.loss_img_weight + 1)
+```
+
+* `loss_text`：文本部分的平均交叉熵损失
+
+* `loss_img` ：图像部分的平均交叉熵损失
+
+* `self.loss_img_weight`：图像损失在总损失中的相对重要性系数（>1 时放大图像 loss）
+
+当 `loss_img_weight = 7` 时，公式相当于：
+
+$$
+\text{loss} = \frac{1 \times \text{loss\_text} + 7 \times \text{loss\_img}}{7 + 1}
+$$
+
+也就是把文本损失和图像损失当作 1:7 的比例来融合。除以 `(self.loss_img_weight + 1)` 可以 **保持总损失的数值 scale** 大致与单一部分损失相同，否则会直接把 loss 放大 8 倍，不利于学习率等超参数设置。例如：
+
+* 若不除以，合并后 loss 规模 ≈ $\text{loss\_text} + 7 \times \text{loss\_img}$
+
+* 除以后 loss 规模 ≈ $\frac{1}{8}\text{loss\_text} + \frac{7}{8}\text{loss\_img}$，整体仍在合理区间
+
+> **通过给图像损失设置更高的权重，平衡文本和图像两部分的训练目标，同时保持总损失数值稳定。**
