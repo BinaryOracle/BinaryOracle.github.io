@@ -7,7 +7,7 @@ tag:
   - 多模态
   - 编辑中
 footer: 技术共建，知识共享
-date: 2025-07-30
+date: 2025-08-10
 author:
   - BinaryOracle
 ---
@@ -20,4 +20,5 @@ author:
 > 代码链接: [https://github.com/microsoft/unilm/tree/master/vlmo](https://github.com/microsoft/unilm/tree/master/vlmo)
 
 ## Introduction
+
 
