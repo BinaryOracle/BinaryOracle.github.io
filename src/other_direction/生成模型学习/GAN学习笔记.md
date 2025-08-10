@@ -5,7 +5,7 @@ category:
   - 生成模型
 tag:
   - 生成模型
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-08-09
 author:
@@ -320,5 +320,255 @@ $$
 
 ## 原始 GAN
 
+GAN 是由 Ian Goodfellow 等人在2014年提出的一种生成模型，核心思想是通过两个神经网络之间的“对抗”训练，生成逼真的数据样本。
 
-## WGAN
+GAN 里有两个角色：
+
+* **生成器（Generator，G）**：负责从随机噪声生成“假数据”，目的是“骗过”判别器。
+
+* **判别器（Discriminator，D）**：负责判断输入是真实数据还是生成器造出来的假数据。
+
+这两个网络互相对抗，判别器力求识别真假样本，生成器力求生成更逼真的样本“骗过”判别器。 GAN 是一个极大极小游戏，目标函数是：
+
+$$
+\min_G \max_D V(D,G) = \mathbb{E}_{x \sim p_{r}}[\log D(x)] + \mathbb{E}_{z \sim p_z}[\log (1 - D(G(z)))]
+$$
+
+解释：
+
+* $p_r$：真实数据分布
+
+* $p_z$：随机噪声分布（通常是均匀或高斯）
+
+* $D(x)$：判别器给输入 $x$ 是真实数据的概率
+
+* $G(z)$：生成器将噪声 $z$ 转换成样本
+
+判别器想最大化识别真假的概率，生成器想最小化判别器识别生成样本为假的概率。
+
+---
+
+**传统GAN训练的完整流程**:
+
+1. **初始化**生成器和判别器网络参数。
+
+2. **训练判别器**
+
+   * 采样一批真实样本 $x \sim p_r$。
+   
+   * 采样一批噪声 $z \sim p_z$，生成假样本 $G(z)$。
+
+   * 计算判别器损失：
+
+     $$
+     L_D = -\left(\mathbb{E}_{x \sim p_r}[\log D(x)] + \mathbb{E}_{z \sim p_z}[\log (1 - D(G(z)))]\right)
+     $$
+
+   * 用梯度下降更新判别器参数，增强它区分真假样本的能力。
+
+3. **训练生成器**
+
+   * 再采样一批噪声 $z \sim p_z$，生成假样本 $G(z)$。
+
+   * 计算生成器损失：
+
+     $$
+     L_G = -\mathbb{E}_{z \sim p_z}[\log D(G(z))]
+     $$
+
+     这里生成器的目标是让判别器认为生成样本是真的（输出概率高）。
+
+   * 用梯度下降更新生成器参数，使生成样本更逼真。
+
+4. **重复步骤2和3**，交替训练判别器和生成器，直到生成器能够生成看起来很真实的数据。
+
+---
+
+**代码实现**:
+
+1. 导包 + 参数准备
+
+```python
+import argparse
+import os
+import numpy as np
+import torchvision.transforms as transforms
+from torchvision.utils import save_image
+from torchvision import datasets
+from torch.autograd import Variable
+import torch.nn as nn
+import torch
+
+os.makedirs("images", exist_ok=True)
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--n_epochs", type=int, default=200, help="number of epochs of training")
+parser.add_argument("--batch_size", type=int, default=64, help="size of the batches")
+parser.add_argument("--lr", type=float, default=0.0002, help="adam: learning rate")
+parser.add_argument("--b1", type=float, default=0.5, help="adam: decay of first order momentum of gradient")
+parser.add_argument("--b2", type=float, default=0.999, help="adam: decay of first order momentum of gradient")
+parser.add_argument("--n_cpu", type=int, default=8, help="number of cpu threads to use during batch generation")
+parser.add_argument("--latent_dim", type=int, default=100, help="dimensionality of the latent space")
+parser.add_argument("--img_size", type=int, default=28, help="size of each image dimension")
+parser.add_argument("--channels", type=int, default=1, help="number of image channels")
+parser.add_argument("--sample_interval", type=int, default=400, help="interval betwen image samples")
+opt = parser.parse_args()
+print(opt)
+
+img_shape = (opt.channels, opt.img_size, opt.img_size)
+cuda = True if torch.cuda.is_available() else False
+```
+
+2. 生成器代码实现
+
+```python
+class Generator(nn.Module):
+    def __init__(self):
+        super(Generator, self).__init__()
+
+        def block(in_feat, out_feat, normalize=True):
+            layers = [nn.Linear(in_feat, out_feat)]
+            if normalize:
+                layers.append(nn.BatchNorm1d(out_feat, 0.8))
+            layers.append(nn.LeakyReLU(0.2, inplace=True))
+            return layers
+
+        self.model = nn.Sequential(
+            *block(opt.latent_dim, 128, normalize=False),
+            *block(128, 256),
+            *block(256, 512),
+            *block(512, 1024),
+            # np.prod 是 NumPy 里的一个函数，用来计算一个数组或元组 所有元素的乘积
+            nn.Linear(1024, int(np.prod(img_shape))),
+            nn.Tanh()
+        )
+
+    def forward(self, z):
+        img = self.model(z)
+        img = img.view(img.size(0), *img_shape)
+        return img
+```
+
+3. 判别器代码实现
+
+```python
+class Discriminator(nn.Module):
+    def __init__(self):
+        super(Discriminator, self).__init__()
+
+        self.model = nn.Sequential(
+            # np.prod 是 NumPy 里的一个函数，用来计算一个数组或元组 所有元素的乘积
+            nn.Linear(int(np.prod(img_shape)), 512),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(512, 256),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(256, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, img):
+        img_flat = img.view(img.size(0), -1)
+        validity = self.model(img_flat)
+
+        return validity
+```
+
+4. 数据，模型，优化器准备
+
+```python
+# Loss function
+adversarial_loss = torch.nn.BCELoss()
+
+# Initialize generator and discriminator
+generator = Generator()
+discriminator = Discriminator()
+
+if cuda:
+    generator.cuda()
+    discriminator.cuda()
+    adversarial_loss.cuda()
+
+# Configure data loader
+os.makedirs("./data/mnist", exist_ok=True)
+dataloader = torch.utils.data.DataLoader(
+    datasets.MNIST(
+        "./data/mnist",
+        train=True,
+        download=True,
+        transform=transforms.Compose(
+            [transforms.Resize(opt.img_size), transforms.ToTensor(), transforms.Normalize([0.5], [0.5])]
+        ),
+    ),
+    batch_size=opt.batch_size,
+    shuffle=True,
+)
+
+# Optimizers
+optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
+optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
+
+Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
+```
+
+5. 训练
+
+```python
+# ----------
+#  Training
+# ----------
+
+for epoch in range(opt.n_epochs):
+    for i, (imgs, _) in enumerate(dataloader):
+
+        # Adversarial ground truths
+        valid = Variable(Tensor(imgs.size(0), 1).fill_(1.0), requires_grad=False)
+        fake = Variable(Tensor(imgs.size(0), 1).fill_(0.0), requires_grad=False)
+
+        # Configure input
+        real_imgs = Variable(imgs.type(Tensor))
+
+        # -----------------
+        #  Train Generator
+        # -----------------
+
+        optimizer_G.zero_grad()
+
+        # Sample noise as generator input
+        z = Variable(Tensor(np.random.normal(0, 1, (imgs.shape[0], opt.latent_dim))))
+
+        # Generate a batch of images
+        gen_imgs = generator(z)
+
+        # Loss measures generator's ability to fool the discriminator
+        g_loss = adversarial_loss(discriminator(gen_imgs), valid)
+
+        g_loss.backward()
+        optimizer_G.step()
+
+        # ---------------------
+        #  Train Discriminator
+        # ---------------------
+
+        optimizer_D.zero_grad()
+
+        # Measure discriminator's ability to classify real from generated samples
+        real_loss = adversarial_loss(discriminator(real_imgs), valid)
+        fake_loss = adversarial_loss(discriminator(gen_imgs.detach()), fake)
+        d_loss = (real_loss + fake_loss) / 2
+
+        d_loss.backward()
+        optimizer_D.step()
+
+        print(
+            "[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f]"
+            % (epoch, opt.n_epochs, i, len(dataloader), d_loss.item(), g_loss.item())
+        )
+
+        batches_done = epoch * len(dataloader) + i
+        if batches_done % opt.sample_interval == 0:
+            save_image(gen_imgs.data[:25], "images/%d.png" % batches_done, nrow=5, normalize=True)
+```
+
+6. 效果
+
+![](GAN/1.png)

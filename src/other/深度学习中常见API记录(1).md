@@ -1,5 +1,5 @@
 ---
-title: 深度学习中常见问题记录
+title: 深度学习中常见问题记录 (1)
 icon: file
 category:
   - tools
@@ -11,7 +11,7 @@ author:
   - BinaryOracle
 ---
 
-`深度学习中常见API记录` 
+` 深度学习中常见问题记录 (1)` 
 
 <!-- more -->
 
