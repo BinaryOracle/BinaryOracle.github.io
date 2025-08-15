@@ -548,11 +548,6 @@ class Attention(nn.Module):
 一般模型训练都会加载多个来源不同的开源或私有数据集，`VLMo` 也不例外，因此 `VLMo` 提供了 `MTDataModule` 类用于完成多数据源加载的任务:
 
 ```python
-from pytorch_lightning import LightningDataModule
-from torch.utils.data import DataLoader, ConcatDataset, DistributedSampler
-import functools
-import torch
-
 class MTDataModule(LightningDataModule):
     def __init__(self, _config, dist=False):
         """
@@ -676,8 +671,256 @@ _datamodules = {
 ```
 当子实现类比较多的时候，自然会存在一些重复性操作，因此 `VLMo` 模型的代码实现中额外抽取了一个抽象类 `BaseDataModule` 用于定义重复性的模版流程，以此来简化子实现类需要做的操作:
 
+```python
+class BaseDataModule(LightningDataModule):
+    def __init__(self, _config):
+        """
+        基础 DataModule 类，支持图文/文本数据集
+        Args:
+            _config: 配置字典，包含数据路径、batch_size、tokenizer 等信息
+        """
+        super().__init__()
+
+        # 数据目录
+        self.data_dir = _config["data_root"]
+
+        # DataLoader 参数
+        self.num_workers = _config["num_workers"]
+        self.batch_size = _config["per_gpu_batchsize"]
+        self.eval_batch_size = self.batch_size
+
+        # 数据处理参数
+        self.image_size = _config["image_size"]
+        self.max_text_len = _config["max_text_len"]
+        self.draw_false_image = _config["draw_false_image"]
+        self.draw_false_text = _config["draw_false_text"]
+        self.image_only = _config["image_only"]
+        self.text_only = _config["text_only"]
+
+        # 数据增强/transform 配置
+        self.train_transform_keys = (
+            ["default_train"]
+            if len(_config["train_transform_keys"]) == 0
+            else _config["train_transform_keys"]
+        )
+        self.val_transform_keys = (
+            ["default_val"]
+            if len(_config["val_transform_keys"]) == 0
+            else _config["val_transform_keys"]
+        )
+
+        # tokenizer
+        tokenizer = _config["tokenizer"]
+        self.tokenizer = get_pretrained_tokenizer(tokenizer)
+        self.vocab_size = self.tokenizer.vocab_size
+
+        # collator: 用于 MLM（mask language model）训练
+        collator = (
+            DataCollatorForWholeWordMask
+            if _config["whole_word_masking"]
+            else DataCollatorForLanguageModeling
+        )
+        self.mlm_collator = collator(
+            tokenizer=self.tokenizer, mlm=True, mlm_probability=_config["mlm_prob"]
+        )
+
+        # setup 状态标志，确保 setup 只执行一次
+        self.setup_flag = False
+
+    @property
+    def dataset_cls(self):
+        """
+        子类必须实现
+        返回 dataset 类（通常是 Dataset 子类）
+        """
+        raise NotImplementedError("return tuple of dataset class")
+
+    @property
+    def dataset_name(self):
+        """
+        子类必须实现
+        返回数据集名称
+        """
+        raise NotImplementedError("return name of dataset")
+
+    def set_train_dataset(self):
+        """
+        构建训练数据集
+        生命周期阶段: setup() 调用
+        """
+        self.train_dataset = self.dataset_cls(
+            self.data_dir,
+            self.train_transform_keys,
+            split="train",
+            image_size=self.image_size,
+            max_text_len=self.max_text_len,
+            draw_false_image=self.draw_false_image,
+            draw_false_text=self.draw_false_text,
+            image_only=self.image_only,
+        )
+
+    def set_val_dataset(self):
+        """
+        构建验证数据集
+        生命周期阶段: setup() 调用
+        """
+        self.val_dataset = self.dataset_cls(
+            self.data_dir,
+            self.val_transform_keys,
+            split="val",
+            image_size=self.image_size,
+            max_text_len=self.max_text_len,
+            draw_false_image=self.draw_false_image,
+            draw_false_text=self.draw_false_text,
+            image_only=self.image_only,
+        )
+
+        # 如果存在“无干扰”验证数据集类，额外构建
+        if hasattr(self, "dataset_cls_no_false"):
+            self.val_dataset_no_false = self.dataset_cls_no_false(
+                self.data_dir,
+                self.val_transform_keys,
+                split="val",
+                image_size=self.image_size,
+                max_text_len=self.max_text_len,
+                draw_false_image=0,
+                draw_false_text=0,
+                image_only=self.image_only,
+            )
+
+    def make_no_false_val_dset(self, image_only=False):
+        """
+        构建无干扰验证数据集（用于评估）
+        """
+        return self.dataset_cls_no_false(
+            self.data_dir,
+            self.val_transform_keys,
+            split="val",
+            image_size=self.image_size,
+            max_text_len=self.max_text_len,
+            draw_false_image=0,
+            draw_false_text=0,
+            image_only=image_only,
+        )
+
+    def make_no_false_test_dset(self, image_only=False):
+        """
+        构建无干扰测试数据集（用于评估）
+        """
+        return self.dataset_cls_no_false(
+            self.data_dir,
+            self.val_transform_keys,
+            split="test",
+            image_size=self.image_size,
+            max_text_len=self.max_text_len,
+            draw_false_image=0,
+            draw_false_text=0,
+            image_only=image_only,
+        )
+
+    def set_test_dataset(self):
+        """
+        构建测试数据集
+        生命周期阶段: setup() 调用
+        """
+        self.test_dataset = self.dataset_cls(
+            self.data_dir,
+            self.val_transform_keys,
+            split="test",
+            image_size=self.image_size,
+            max_text_len=self.max_text_len,
+            draw_false_image=self.draw_false_image,
+            draw_false_text=self.draw_false_text,
+            image_only=self.image_only,
+        )
+
+    def setup(self, stage):
+        """
+        数据集构建钩子
+        生命周期阶段: Trainer.fit(), Trainer.validate(), Trainer.test() 内部调用
+        """
+        if not self.setup_flag:
+            # 构建 train/val/test 数据集
+            self.set_train_dataset()
+            self.set_val_dataset()
+            self.set_test_dataset()
+
+            # 给 dataset 注入 tokenizer
+            self.train_dataset.tokenizer = self.tokenizer
+            self.val_dataset.tokenizer = self.tokenizer
+            self.test_dataset.tokenizer = self.tokenizer
+
+            self.setup_flag = True  # 标记 setup 已完成
+
+    def train_dataloader(self):
+        """
+        构建训练 DataLoader
+        生命周期阶段: Trainer.fit() 内部调用
+        """
+        loader = DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,  # 训练集通常打乱
+            num_workers=self.num_workers,
+            pin_memory=True,
+            collate_fn=self.train_dataset.collate,
+        )
+        return loader
+
+    def val_dataloader(self):
+        """
+        构建验证 DataLoader
+        生命周期阶段: Trainer.validate() 或 Trainer.fit() 内部验证调用
+        """
+        loader = DataLoader(
+            self.val_dataset,
+            batch_size=self.eval_batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            collate_fn=self.val_dataset.collate,
+        )
+        return loader
+
+    def test_dataloader(self):
+        """
+        构建测试 DataLoader
+        生命周期阶段: Trainer.test() 内部调用
+        """
+        loader = DataLoader(
+            self.test_dataset,
+            batch_size=self.eval_batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            collate_fn=self.test_dataset.collate,
+        )
+        return loader
+```
+`VLMo` 在训练或验证数据集可能会加入一些“干扰样本”：
+
+* `draw_false_image=1`：给文本配上错误图像
+ 
+* `draw_false_text=1`：给图像配上错误文本
+
+这种策略有助于模型学习**跨模态对齐能力**，增强鲁棒性，但它会让数据本身有“噪声”。
+
+**为什么需要无干扰数据集？**
+   
+* 在训练中，你希望模型看到“有干扰”的数据，提高判别能力；
+
+* 在评估阶段，你希望衡量模型在**真实匹配样本**上的性能，这时候就要去掉干扰，即 `draw_false_image=0`、`draw_false_text=0`；
+
+* 这保证了评估指标（如准确率、召回率等）反映的是模型对正确样本的能力，而不是对抗干扰样本的能力。
 
 
+**具体实现:**
+
+* `make_no_false_val_dset` → 构建无干扰的验证集，保证验证指标真实可靠；
+
+* `make_no_false_test_dset` → 构建无干扰的测试集，用于最终评估模型效果；
+
+* 可以选择 `image_only=True` 或 `False` 来控制是否只用图像作为输入。
 
 
 
