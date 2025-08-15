@@ -1001,7 +1001,7 @@ class BaseDataset(torch.utils.data.Dataset):
 class VLMo(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
-        # 记录一下本轮训练需要推进的学习任务有几个: ['itm', 'itc', 'mlm'] (正常情况下有三个)
+        # 记录一下本轮训练需要推进的学习任务有几个: ['itm', 'itc', 'mlm'] (预训练阶段有三个)
         vlmo_utils.set_task(self)
         # 调用 VLMo 的 forward 方法
         output = self(batch)
