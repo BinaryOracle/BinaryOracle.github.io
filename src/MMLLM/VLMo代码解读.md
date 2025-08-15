@@ -468,3 +468,15 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
         return x
 ```
+
+## VLMo 
+
+主模型 `VLMo` 由于使用了 `PyTorch Lightning` 实验全流程管理框架，使得其代码看起来并不常规，但是其本质还是借助 `模版方法设计模型` 抽取出一套通用的模版流程，并通过在各个模版节点预留钩子函数的方式，使得用户可以在不改变模版流程的情况下，自定义模型的行为; 
+
+因此，我们首先用一幅图理清楚 `PyTorch Lightning` 预留的这套模版流程是怎么设计的:
+
+![图片取至 [PytorchLightning : Model calls order](https://stackoverflow.com/questions/73985576/pytorchlightning-model-calls-order?utm_source=chatgpt.com)](VLMO/1.png)
+
+
+
+
