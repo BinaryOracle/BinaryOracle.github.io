@@ -1057,3 +1057,146 @@ def set_task(pl_module):
 
         return ret
 ```
+下面会分小节独立对每个学习任务的计算过程进行详解:
+
+#### Masked Language Modeling
+
+第一个学习目标是 `MLM` 任务，该任务的学习目标是根据未被掩码的图像序列和文本序列，去预测被掩码的 `Token` 原来的标签; 具体代码实现如下所示:
+
+```python
+def infer(
+    self,
+    batch,
+    mask_text=False,              # 是否对文本做MLM掩码（Mask Language Modeling）
+    mask_image=False,             # 是否对图像做mask（当前代码未使用）
+    image_token_type_idx=1,       # 图像 token 类型的索引（用于 token_type_embeddings）
+    image_embeds=None,            # 可选：外部直接传入图像embedding
+    image_masks=None,             # 可选：外部直接传入图像mask
+):
+    # 1. 选择图像键名 (去除多视角图像选择逻辑)
+    imgkey = "image"
+
+    # 2. 确定是否使用 MLM 数据（_mlm 后缀）
+    do_mlm = "_mlm" if mask_text else ""
+    
+    # 3. 取出文本相关的张量
+    text_ids = batch[f"text_ids{do_mlm}"]       # 文本 token ID
+    text_labels = batch[f"text_labels{do_mlm}"] # 文本标签（训练时可能是-100占位）
+    text_masks = batch[f"text_masks"]           # 文本 attention mask（padding位置为0）
+    
+    # 4. 将 token ID 转成嵌入向量
+    text_embeds = self.text_embeddings(text_ids)
+
+    # 5. 取出图像并做视觉编码
+    img = batch[imgkey][0]  # 图像张量（通常是 [B, C, H, W]）
+    image_embeds, image_masks = self.transformer.visual_embed(img)
+    #   image_embeds: 图像的 patch embedding
+    #   image_masks: 图像的 attention mask
+
+    # 6. 转成 long 类型（以防下游 embedding 索引出错）
+    image_masks = image_masks.long()
+
+    # 7. 给文本和图像 embedding 添加 token type embedding（区分模态）
+    text_embeds, image_embeds = (
+        text_embeds + self.token_type_embeddings(torch.zeros_like(text_masks)),  # 文本类型 idx=0
+        image_embeds + self.token_type_embeddings(
+            torch.full_like(image_masks, image_token_type_idx)                   # 图像类型 idx=image_token_type_idx
+        ),
+    )
+
+    # 8. 将文本和图像序列拼接
+    co_embeds = torch.cat([text_embeds, image_embeds], dim=1)  # 拼接 embedding
+    co_masks = torch.cat([text_masks, image_masks], dim=1)     # 拼接 mask
+
+    # 9. 输入 transformer encoder
+    x = co_embeds
+    relative_position_bias_list = self.get_rel_pos_bias(self.text_imag_relative_position_index)
+
+    for i, blk in enumerate(self.transformer.blocks):
+        # 每个 block 都处理文本+图像的联合序列
+        x = blk(
+            x, 
+            mask=co_masks, 
+            modality_type="vl", 
+            relative_position_bias=relative_position_bias_list[i]
+        )
+
+    # 10. LayerNorm 归一化
+    x = self.transformer.norm(x)
+
+    # 11. 拆回文本特征和图像特征
+    text_feats, image_feats = (
+        x[:, : text_embeds.shape[1]],            # 前半部分是文本
+        x[:, text_embeds.shape[1] :],            # 后半部分是图像
+    )
+
+    # 12. 获取 CLS token 的池化特征
+    cls_feats = self.pooler(x)  # 一般是 x[:,0] 做线性变换
+                                # 但这里保留 raw_cls_feats 也就是未pooler的
+
+    # 13. 返回推理结果字典
+    ret = {
+        "text_feats": text_feats,          # 文本的序列特征
+        "image_feats": image_feats,        # 图像的序列特征
+        "cls_feats": cls_feats,            # CLS token 经过pooler的特征
+        "raw_cls_feats": x[:, 0],          # CLS token的原始特征
+        "image": img,                      # 原始图像张量
+        "text_labels": text_labels,        # 文本标签
+        "text_ids": text_ids,              # 文本 token ID
+        "text_masks": text_masks,          # 文本 attention mask
+    }
+
+    return ret
+```
+
+```python
+def compute_mlm(pl_module, batch):
+    # 1. 调用 pl_module 的 infer 方法，开启 mask_text=True
+    #    表示对输入文本做 MLM 掩码，mask_image=False 表示不对图像做掩码
+    #    返回的 infer 字典中包含文本/图像的特征、标签等信息
+    infer = pl_module.infer(batch, mask_text=True, mask_image=False)
+
+    # 2. 将文本特征输入 MLM 预测头（mlm_score），得到预测的 token logits (上下文编码投影到词空间)
+    #    mlm_logits 形状通常为 [batch_size, seq_len, vocab_size]
+    mlm_logits = pl_module.mlm_score(infer["text_feats"])
+
+    # 3. 取出 MLM 任务的标签
+    #    标签中非 mask 位置一般是 -100（会被交叉熵忽略）
+    mlm_labels = infer["text_labels"]
+
+    # 4. 计算 MLM 的交叉熵损失
+    #    - 将 logits 展平为 [batch_size*seq_len, vocab_size]
+    #    - 将 labels 展平为 [batch_size*seq_len]
+    #    - ignore_index=-100 表示这些位置不计入损失
+    mlm_loss = F.cross_entropy(
+        mlm_logits.view(-1, pl_module.hparams.config["vocab_size"]),
+        mlm_labels.view(-1),
+        ignore_index=-100,
+    )
+
+    # 5. 将 MLM 损失乘以权重 0.25（可能是多任务训练中给 MLM 任务的损失权重）
+    ret = {
+        "mlm_loss": mlm_loss * 0.25,
+        "mlm_logits": mlm_logits,
+        "mlm_labels": mlm_labels,
+        "mlm_ids": infer["text_ids"],  # 原始文本 token id
+    }
+
+    # 6. 判断当前是训练阶段还是验证阶段
+    phase = "train" if pl_module.training else "val"
+
+    # 7. 将 MLM 损失记录到 pl_module 的对应指标（train_mlm_loss 或 val_mlm_loss）
+    loss = getattr(pl_module, f"{phase}_mlm_loss")(ret["mlm_loss"])
+
+    # 8. 计算 MLM 预测准确率（忽略 -100 的位置）
+    acc = getattr(pl_module, f"{phase}_mlm_accuracy")(
+        ret["mlm_logits"], ret["mlm_labels"]
+    )
+
+    # 9. 记录损失和准确率到日志（方便 TensorBoard / WandB 可视化）
+    pl_module.log(f"mlm/{phase}/loss", loss)
+    pl_module.log(f"mlm/{phase}/accuracy", acc)
+
+    # 10. 返回结果字典（损失、预测值、标签、文本id）
+    return ret
+```
