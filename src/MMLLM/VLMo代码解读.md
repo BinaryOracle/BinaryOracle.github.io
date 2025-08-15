@@ -990,3 +990,5 @@ class BaseDataset(torch.utils.data.Dataset):
 ![batch中只有一条数据](VLMO/3.png)
 
 ![按key进行聚合](VLMO/4.png)
+
+> PyTorch 的 CrossEntropyLoss（尤其是 Hugging Face Transformers 的实现里）中，-100 会被当作 ignore_index，即这些位置不参与 loss 计算
