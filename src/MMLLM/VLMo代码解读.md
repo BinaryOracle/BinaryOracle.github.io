@@ -923,7 +923,25 @@ class BaseDataModule(LightningDataModule):
 * 可以选择 `image_only=True` 或 `False` 来控制是否只用图像作为输入。
 
 
+有了 `BaseDataModule` 类负责完成通用模版流程的抽取，子类需要做的事情就非常简单了，只需要告知父类自己的数据集名和数据集类的具体实现即可:
 
+```python
+class CocoCaptionKarpathyDataModule(BaseDataModule):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @property
+    def dataset_cls(self):
+        return CocoCaptionKarpathyDataset
+
+    @property
+    def dataset_cls_no_false(self):
+        return CocoCaptionKarpathyDataset
+
+    @property
+    def dataset_name(self):
+        return "coco"
+```
 
 
 
