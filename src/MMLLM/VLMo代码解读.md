@@ -375,6 +375,8 @@ x = x + γ2 * MLP(x)
 * 为什么分开？因为 Attention 和 MLP 输出的统计特性不同，需要不同的缩放系数
 
 
+`Attention` 模块的代码属于模版代码，不涉及新技术的引入，代码实现如下所示:
+
 ```python
 class Attention(nn.Module):
     def __init__(
