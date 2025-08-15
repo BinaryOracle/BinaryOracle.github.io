@@ -29,8 +29,6 @@ VLMO 模型的代码实现中主要使用了以下两个库，如果不提前了
 
 > `VLMo` 模型代码实现是基于 `ViLT` 模型代码进行修改的，因此如果研究过 `ViLT` 代码实现的同学，对 `VLMo` 模型的代码实现应该比较亲切。
 
-## 数据处理
-
 ## MOME（Mixture of Multimodal Experts）Transformer
 
 VLMO 论文中所提到的 `MOME Transformer` 的代码实现对应的类是 `MultiWayTransformer` , 本节我们将一点点完成该类代码的拆解; 首先，既然是 `混合多模态专家模型`, 那么它就需要具有同时处理图像和文本的能力；对于输入的图像，第一步需要完成图像的切片和嵌入，该功能由 `PatchEmbed` 类负责完成，具体代码实现如下:
@@ -479,7 +477,210 @@ class Attention(nn.Module):
 
 ![图片取至 [PytorchLightning : Model calls order](https://stackoverflow.com/questions/73985576/pytorchlightning-model-calls-order?utm_source=chatgpt.com)](VLMO/1.png)
 
-下面我们来分析一下 `VLMo` 模型代码的具体实现:
+```python
+1. 初始化阶段
+   ├─ 用户创建 LightningModule 和 Trainer                   (用户代码)
+   ├─ LightningModule.configure_optimizers()                 (LightningModule)
+   ├─ Trainer 配置 logger、callbacks、accelerator、分布式   (Trainer 内部)
+
+2. 数据准备阶段
+   ├─ LightningDataModule.prepare_data()                     (LightningDataModule, global_rank=0)
+   └─ LightningDataModule.setup(stage)                       (LightningDataModule, 每个进程, stage ∈ {'fit','validate','test','predict'})
+
+3. 数据加载阶段
+   ├─ LightningDataModule.train_dataloader()                (LightningDataModule)
+   ├─ LightningDataModule.val_dataloader()                  (LightningDataModule)
+   └─ LightningDataModule.test_dataloader()                 (LightningDataModule)
+
+4. 训练阶段（fit）
+   ├─ Trainer.on_fit_start()                                  (Trainer 调用所有 callbacks.on_fit_start)
+   └─ Epoch 循环 (for epoch in max_epochs)
+       ├─ Trainer.on_train_epoch_start()                     (Trainer callbacks)
+       └─ Batch 循环 (for batch in train_dataloader)
+            ├─ Trainer.on_train_batch_start(batch, batch_idx)   (Trainer callbacks)
+            ├─ LightningModule.training_step(batch, batch_idx)  (LightningModule)
+            ├─ Trainer.on_before_zero_grad(optimizer)           (Trainer callbacks)
+            ├─ optimizer.zero_grad()                             (PyTorch)
+            ├─ loss.backward()                                   (PyTorch)
+            ├─ Trainer.on_after_backward()                        (Trainer callbacks)
+            ├─ Trainer.on_before_optimizer_step(optimizer)       (Trainer callbacks)
+            ├─ optimizer.step()                                   (PyTorch)
+            └─ Trainer.on_train_batch_end(output, batch, batch_idx)(Trainer callbacks)
+       ├─ LightningModule.training_epoch_end(outputs)         (LightningModule)
+       └─ Trainer.on_train_epoch_end()                        (Trainer callbacks)
+
+       └─ 验证阶段（每个 epoch 后可选）
+            ├─ Trainer.on_validation_start()                  (Trainer callbacks)
+            ├─ model.eval(), torch.no_grad()                  (Trainer 内部)
+            └─ 循环 val_dataloader
+                 ├─ LightningModule.validation_step(batch, batch_idx)     (LightningModule)
+                 ├─ LightningModule.validation_step_end(output)           (LightningModule)
+                 └─ 汇总 outputs
+            ├─ LightningModule.validation_epoch_end(outputs)               (LightningModule)
+            └─ Trainer.on_validation_epoch_end()                            (Trainer callbacks)
+   └─ Trainer.on_fit_end()                                       (Trainer callbacks)
+
+5. 测试阶段（test）
+   ├─ Trainer.on_test_start()                                     (Trainer callbacks)
+   ├─ model.eval(), torch.no_grad()                               (Trainer 内部)
+   └─ 循环 test_dataloader
+        ├─ LightningModule.test_step(batch, batch_idx)            (LightningModule)
+        ├─ LightningModule.test_step_end(output)                  (LightningModule)
+        └─ 汇总 outputs
+   ├─ LightningModule.test_epoch_end(outputs)                     (LightningModule)
+   └─ Trainer.on_test_end()                                        (Trainer callbacks)
+
+6. 预测阶段（predict）
+   ├─ Trainer.on_predict_start()                                  (Trainer callbacks)
+   ├─ model.eval(), torch.no_grad()                               (Trainer 内部)
+   └─ 循环 predict_dataloader
+        ├─ LightningModule.predict_step(batch, batch_idx)         (LightningModule)
+        ├─ LightningModule.predict_step_end(output)               (LightningModule)
+        └─ 汇总 outputs
+   ├─ LightningModule.predict_epoch_end(outputs)                  (LightningModule)
+   └─ Trainer.on_predict_end()                                     (Trainer callbacks)
+```
+
+下面我们将结合上面的模版流程，分析一下 `VLMo` 在模版流程的各种阶段都做了什么:
+
+### 数据模块
+
+一般模型训练都会加载多个来源不同的开源或私有数据集，`VLMo` 也不例外，因此 `VLMo` 提供了 `MTDataModule` 类用于完成多数据源加载的任务:
+
+```python
+from pytorch_lightning import LightningDataModule
+from torch.utils.data import DataLoader, ConcatDataset, DistributedSampler
+import functools
+import torch
+
+class MTDataModule(LightningDataModule):
+    def __init__(self, _config, dist=False):
+        """
+        多任务/多数据集 DataModule，负责管理多个子数据集
+        Args:
+            _config: 配置字典，包含数据集 key 和其他参数
+            dist: 是否使用分布式采样
+        """
+        datamodule_keys = _config["datasets"]
+        assert len(datamodule_keys) > 0
+
+        super().__init__()
+
+        # 保存数据集 key 和对应的数据模块实例
+        self.dm_keys = datamodule_keys
+        self.dm_dicts = {key: _datamodules[key](_config) for key in datamodule_keys}
+        self.dms = [v for k, v in self.dm_dicts.items()]
+
+        # 从第一个数据模块读取通用配置
+        self.batch_size = self.dms[0].batch_size
+        self.vocab_size = self.dms[0].vocab_size
+        self.num_workers = self.dms[0].num_workers
+
+        self.dist = dist  # 是否使用分布式采样
+
+    def prepare_data(self):
+        """
+        数据准备阶段（只在主进程调用一次）
+        生命周期阶段: Trainer 调用 prepare_data()
+        """
+        for dm in self.dms:
+            dm.prepare_data()  # 调用每个子数据模块的 prepare_data
+
+    def setup(self, stage):
+        """
+        数据集构建阶段，每个进程都会调用
+        Args:
+            stage: 'fit', 'validate', 'test', 'predict' 等
+        """
+        for dm in self.dms:
+            dm.setup(stage)  # 调用子数据模块的 setup
+
+        # 合并各个子数据集
+        self.train_dataset = ConcatDataset([dm.train_dataset for dm in self.dms])
+        self.val_dataset = ConcatDataset([dm.val_dataset for dm in self.dms])
+        self.test_dataset = ConcatDataset([dm.test_dataset for dm in self.dms])
+
+        # 保存 tokenizer 和 collate 函数
+        self.tokenizer = self.dms[0].tokenizer
+        self.collate = functools.partial(
+            self.dms[0].train_dataset.collate,
+            mlm_collator=self.dms[0].mlm_collator,
+        )
+
+        # 分布式采样器
+        if self.dist and torch.distributed.is_initialized():
+            self.train_sampler = DistributedSampler(self.train_dataset, shuffle=True)
+            self.val_sampler = DistributedSampler(self.val_dataset, shuffle=True)
+            self.test_sampler = DistributedSampler(self.test_dataset, shuffle=False)
+        else:
+            self.train_sampler = None
+            self.val_sampler = None
+            self.test_sampler = None
+
+    def train_dataloader(self):
+        """
+        返回训练 DataLoader
+        生命周期阶段: Trainer.fit() 内部调用
+        """
+        loader = DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            sampler=self.train_sampler,
+            num_workers=self.num_workers,
+            collate_fn=self.collate,
+        )
+        return loader
+
+    def val_dataloader(self, batch_size=None):
+        """
+        返回验证 DataLoader
+        生命周期阶段: Trainer.validate() 或 Trainer.fit() 内部验证调用
+        """
+        loader = DataLoader(
+            self.val_dataset,
+            batch_size=batch_size if batch_size is not None else self.batch_size,
+            sampler=self.val_sampler,
+            num_workers=self.num_workers,
+            collate_fn=self.collate,
+        )
+        return loader
+
+    def test_dataloader(self):
+        """
+        返回测试 DataLoader
+        生命周期阶段: Trainer.test() 内部调用
+        """
+        loader = DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size,
+            sampler=self.test_sampler,
+            num_workers=self.num_workers,
+            collate_fn=self.collate,
+        )
+        return loader
+```
+
+`_datamodules` 字典中保存了 `VLMo` 所使用到的所有数据集对应的 `DataModule` 实现类:
+
+```python
+_datamodules = {
+    "vg": VisualGenomeCaptionDataModule,
+    "f30k": F30KCaptionKarpathyDataModule,
+    "coco": CocoCaptionKarpathyDataModule,
+    "gcc": ConceptualCaptionDataModule,
+    "sbu": SBUCaptionDataModule,
+    "wikibk": WikibkDataModule,
+    "vqa": VQAv2DataModule,
+    "nlvr2": NLVR2DataModule,
+}
+```
+当子实现类比较多的时候，自然会存在一些重复性操作，因此 `VLMo` 模型的代码实现中额外抽取了一个抽象类 `BaseDataModule` 用于定义重复性的模版流程，以此来简化子实现类需要做的操作:
+
+
+
+
+
+
 
 
 
