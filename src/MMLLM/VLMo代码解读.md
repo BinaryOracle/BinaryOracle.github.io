@@ -942,8 +942,51 @@ class CocoCaptionKarpathyDataModule(BaseDataModule):
     def dataset_name(self):
         return "coco"
 ```
+当 `VLMo` 通过 `LightningDataModule` 完成 `DataSet` 的 `prepare` 和 `set_up` 后，下一步便可以通过 `DataLoader` 来正常获取一个批次的数据了，这里以 `CocoCaptionKarpathyDataset` 子实现类为例，看一下数据的形式:
+
+```python
+class CocoCaptionKarpathyDataset(BaseDataset):
+    def __init__(self, *args, split="", **kwargs):
+        assert split in ["train", "val", "test"]
+        self.split = split
+
+        if split == "train":
+            names = ["coco_caption_karpathy_train", "coco_caption_karpathy_restval"]
+        elif split == "val":
+            names = ["coco_caption_karpathy_val"]
+        elif split == "test":
+            names = ["coco_caption_karpathy_test"]
+
+        super().__init__(*args, **kwargs, names=names, text_column_name="caption")
+
+    def __getitem__(self, index):
+        suite = self.get_suite(index)
+
+        if "test" in self.split:
+            _index, _question_index = self.index_mapper[index]
+            iid = self.table["image_id"][_index].as_py()
+            iid = int(iid.split(".")[0].split("_")[-1])
+            suite.update({"iid": iid})
+
+        return suite
+```
+通过 `CocoCaptionKarpathyDataset` 的 `__getitem__` 方法，每次可以获取一条样本数据，具体形式如下:
+
+![](VLMo/2.png)
 
 
+基类 `BaseDataset` 中提供了 `collate` 方法，用于 `DataLoader` 积攒起一批样本数据后，回调该钩子方法完成合适的批量数据格式组织:
 
+```python
+class BaseDataset(torch.utils.data.Dataset):
 
+    def collate(self, batch, mlm_collator):
+        batch_size = len(batch)
+        ...
+        return dict_batch
+```
+该方法实现过程比较复杂，但其主要负责将输入的 `batch` 数据按 `key` 进行聚合 , 同时对输入的文本数据回调 `mlm_collator` 钩子方法，完成 `Masked Language Modeling（MLM）` 任务 , 生成两个新的 `key` : `text_ids_mlm` 和 `text_labels_mlm` 用于表示 `MLM` 后的 `input_ids` 和 `mask标签`。
 
+![batch中只有一条数据](VLMo/3.png)
+
+![按key进行聚合](VLMo/4.png)
