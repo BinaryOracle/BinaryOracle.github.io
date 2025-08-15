@@ -992,3 +992,29 @@ class BaseDataset(torch.utils.data.Dataset):
 ![按key进行聚合](VLMO/4.png)
 
 > PyTorch 的 CrossEntropyLoss（尤其是 Hugging Face Transformers 的实现里）中，-100 会被当作 ignore_index，即这些位置不参与 loss 计算
+
+### 模型实现
+
+从本节开始，我们将进入 `VLMo` 模型代码解析的核心部分，首先是其实现的钩子方法 `training_step` ，该方法负责完成具体的一轮训练实现:
+
+```python
+class VLMo(pl.LightningModule):
+
+    def training_step(self, batch, batch_idx):
+        # 记录一下本轮训练需要推进的学习任务有几个: ['itm', 'itc', 'mlm'] (正常情况下有三个)
+        vlmo_utils.set_task(self)
+        # 调用 VLMo 的 forward 方法
+        output = self(batch)
+        # 累加所有学习任务结束后的损失
+        total_loss = sum([v for k, v in output.items() if "loss" in k])
+
+        return total_loss
+```
+```python
+def set_task(pl_module):
+    pl_module.current_tasks = [
+        k for k, v in pl_module.hparams.config["loss_names"].items() if v >= 1
+    ]
+    return
+```
+
