@@ -1200,3 +1200,161 @@ def compute_mlm(pl_module, batch):
     # 10. 返回结果字典（损失、预测值、标签、文本id）
     return ret
 ```
+
+#### Contrastive loss for pretraining
+
+
+第二个学习目标是 `ITC` 任务，该任务的学习目标是采用对比学习策略，最大化相似度矩阵对角线的相似度得分，同时最小化非对角线的非匹配样本相似度得分。
+
+```python
+def infer_image(
+    self,
+    batch,
+    mask_image=False,              # 是否对图像进行mask（这里参数传入，但当前实现没用到）
+    image_token_type_idx=1,        # 图像token类型id（区分文本和图像的token type embedding）
+    image_embeds=None,             # 预先计算好的图像embedding（可选）
+    image_masks=None,              # 预先计算好的图像mask（可选）
+):
+    # 1. 确定 batch 中的图像 key
+    imgkey = "image"
+
+    # 2. 从 batch 中取出图像数据（注意这里取 [0]，可能是因为 batch[imgkey] 是个列表/元组）
+    img = batch[imgkey][0]
+
+    # 3. 将图像输入 visual_embed，得到图像token embedding和对应的mask
+    image_embeds, image_masks = self.transformer.visual_embed(img)
+
+    # 4. 将 mask 转为 long 类型，并放到和图像相同的设备上
+    image_masks = image_masks.long().to(device=img.get_device())
+
+    # 5. 给图像embedding加上 token type embedding（值为 image_token_type_idx）
+    image_embeds = image_embeds + self.token_type_embeddings(
+        torch.full_like(image_masks, image_token_type_idx)
+    )
+
+    # 6. 因为这里只有图像，所以 co_embeds / co_masks 就是图像的
+    co_embeds = image_embeds
+    co_masks = image_masks
+
+    # 7. 初始化 transformer 输入
+    x = co_embeds
+    all_hidden_states = []  # 存每一层的输出，方便后续做分支处理
+
+    # 8. 计算相对位置偏置（relative position bias），用于注意力机制
+    relative_position_bias_list = self.get_rel_pos_bias(self.relative_position_index)
+
+    # 9. 依次经过 transformer 的每一层 block（这里是图像模式）
+    for i, blk in enumerate(self.transformer.blocks):
+        x = blk(
+            x,
+            mask=co_masks,
+            modality_type="image",  # 模态类型指定为 "image"
+            relative_position_bias=relative_position_bias_list[i]
+        )
+        all_hidden_states.append(x)
+
+    # 10. 从指定层（vlffn_start_layer_index）开始，进行 VL-FFN（多模态融合的前馈网络）
+    #     注意这里虽然是图像推理，但 VL block 可能是专门用来做 cross-modal fine-tuning 的
+    vlffn_hiddens = all_hidden_states[self.vlffn_start_layer_index - 1]
+    for vlffn_index in range(self.vlffn_start_layer_index, self.num_layers):
+        vlffn_hiddens = self.transformer.blocks[vlffn_index](
+            vlffn_hiddens,
+            mask=co_masks,
+            modality_type="vl",  # 模态类型变为 "vl"，表示融合层
+            relative_position_bias=relative_position_bias_list[vlffn_index]
+        )
+
+    # 11. 取最后一层图像 hidden states
+    vffn_hiddens = all_hidden_states[-1]
+
+    # 12. 对最后一层输出做 LayerNorm
+    vffn_hiddens = self.transformer.norm(vffn_hiddens)
+
+    # 13. 这里 text_feats 为空，因为这是纯图像推理
+    text_feats, image_feats = (
+        None,
+        vffn_hiddens,
+    )
+
+    # 14. 提取 ITC（Image-Text Contrastive）用的图像 CLS 特征
+    cls_feats = self.itc_image_proj(vffn_hiddens[:, 0])  # 取 CLS token
+    cls_feats = cls_feats / cls_feats.norm(dim=-1, keepdim=True)  # L2 归一化
+
+    # 15. 提取 VL-FFN 层的 CLS 特征（跨模态表示）
+    vlffn_hiddens = self.transformer.norm(vlffn_hiddens)
+    cls_vlffn_feats = self.itc_vl_image_proj(vlffn_hiddens[:, 0])
+    cls_vlffn_feats = cls_vlffn_feats / cls_vlffn_feats.norm(dim=-1, keepdim=True)
+
+    # 16. 返回推理结果字典
+    ret = {
+        "text_feats": text_feats,           # 文本特征（这里为空）
+        "image_feats": image_feats,         # 图像特征（最后一层输出）
+        "cls_feats": cls_feats,             # ITC用的图像 CLS 特征
+        "cls_vlffn_feats": cls_vlffn_feats, # VL-FFN用的图像 CLS 特征
+        "raw_cls_feats": x[:, 0],           # 最后一次 forward 的原始 CLS token
+        "image_masks": image_masks,         # 图像mask
+        "text_labels": None,                # 文本标签（为空）
+        "text_ids": None,                    # 文本token ids（为空）
+        "text_masks": None,                  # 文本mask（为空）
+    }
+
+    return ret
+```
+
+```python
+    def infer_text(
+        self,
+        batch,
+        mask_text=False,
+    ):
+        do_mlm = "_mlm" if mask_text else ""
+        text_ids = batch[f"text_ids{do_mlm}"]
+        text_labels = batch[f"text_labels{do_mlm}"]
+        text_masks = batch[f"text_masks"]
+        text_embeds = self.text_embeddings(text_ids)
+        text_embeds = text_embeds + self.token_type_embeddings(torch.zeros_like(text_masks))
+
+        co_embeds = text_embeds
+        co_masks = text_masks
+
+        x = co_embeds
+        all_hidden_states = []
+        relative_position_bias_list = self.get_rel_pos_bias(self.text_relative_position_index)
+
+        for i, blk in enumerate(self.transformer.blocks):
+            x = blk(x, mask=co_masks, modality_type="text", relative_position_bias=relative_position_bias_list[i])
+            all_hidden_states.append(x)
+        
+        vlffn_hiddens = all_hidden_states[self.vlffn_start_layer_index-1]
+        for vlffn_index in range(self.vlffn_start_layer_index, self.num_layers):
+            vlffn_hiddens = self.transformer.blocks[vlffn_index](vlffn_hiddens, mask=co_masks, modality_type="vl", relative_position_bias=relative_position_bias_list[vlffn_index])
+
+        lffn_hiddens = all_hidden_states[-1]
+
+        lffn_hiddens = self.transformer.norm(lffn_hiddens)
+        text_feats, image_feats = (
+            lffn_hiddens,
+            None,
+        )
+
+        cls_feats = self.itc_text_proj(lffn_hiddens[:, 0])
+        cls_feats = cls_feats / cls_feats.norm(dim=-1, keepdim=True)
+
+        vlffn_hiddens = self.transformer.norm(vlffn_hiddens)
+        cls_vlffn_feats = self.itc_vl_text_proj(vlffn_hiddens[:, 0])
+        cls_vlffn_feats = cls_vlffn_feats / cls_vlffn_feats.norm(dim=-1, keepdim=True)
+
+        ret = {
+            "text_feats": text_feats,
+            "image_feats": image_feats,
+            "cls_feats": cls_feats,
+            "cls_vlffn_feats": cls_vlffn_feats,
+            "raw_cls_feats": x[:, 0],
+            "image_masks": None,
+            "text_labels": text_labels,
+            "text_ids": text_ids,
+            "text_masks": text_masks,
+        }
+
+        return ret
+```
