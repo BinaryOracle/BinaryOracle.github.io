@@ -1018,3 +1018,42 @@ def set_task(pl_module):
     return
 ```
 
+`VLMo` 模型的前向传播阶段会根据学习任务列表，分别进行多次独立的前向传播完成对应学习任务推进损失的计算，同时将损失记录在字典中:
+
+```python
+    def forward(self, batch):
+        ret = dict()
+        if len(self.current_tasks) == 0:
+            ret.update(self.infer(batch))
+            return ret
+
+        # Masked Language Modeling
+        if "mlm" in self.current_tasks:
+            ret.update(objectives.compute_mlm(self, batch))
+
+        # Textonly Masked Language Modeling
+        if "textmlm" in self.current_tasks:
+            ret.update(objectives.compute_textonly_mlm(self, batch))
+
+        # Contrastive loss for pretraining
+        if "itc" in self.current_tasks:
+            ret.update(objectives.compute_itc(self, batch))
+
+        # Contrastive loss for finetuning
+        if "irtr" in self.current_tasks:
+            ret.update(objectives.compute_irtr(self, batch))
+
+        # Image Text Matching with global hard negative, must use with itc
+        if "itm" in self.current_tasks:
+            ret.update(objectives.compute_itm_hardneg(self, batch, ret["itc_i2t_logits"], ret["itc_t2i_logits"]))
+
+        # Visual Question Answering
+        if "vqa" in self.current_tasks:
+            ret.update(objectives.compute_vqa(self, batch))
+
+        # Natural Language for Visual Reasoning 2
+        if "nlvr2" in self.current_tasks:
+            ret.update(objectives.compute_nlvr2(self, batch))
+
+        return ret
+```
