@@ -972,7 +972,7 @@ class CocoCaptionKarpathyDataset(BaseDataset):
 ```
 通过 `CocoCaptionKarpathyDataset` 的 `__getitem__` 方法，每次可以获取一条样本数据，具体形式如下:
 
-![](VLMo/2.png)
+![](VLMO/2.png)
 
 
 基类 `BaseDataset` 中提供了 `collate` 方法，用于 `DataLoader` 积攒起一批样本数据后，回调该钩子方法完成合适的批量数据格式组织:
@@ -987,6 +987,6 @@ class BaseDataset(torch.utils.data.Dataset):
 ```
 该方法实现过程比较复杂，但其主要负责将输入的 `batch` 数据按 `key` 进行聚合 , 同时对输入的文本数据回调 `mlm_collator` 钩子方法，完成 `Masked Language Modeling（MLM）` 任务 , 生成两个新的 `key` : `text_ids_mlm` 和 `text_labels_mlm` 用于表示 `MLM` 后的 `input_ids` 和 `mask标签`。
 
-![batch中只有一条数据](VLMo/3.png)
+![batch中只有一条数据](VLMO/3.png)
 
-![按key进行聚合](VLMo/4.png)
+![按key进行聚合](VLMO/4.png)
