@@ -27,6 +27,8 @@ VLMO 模型的代码实现中主要使用了以下两个库，如果不提前了
 
 2. [PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/starter/introduction.html)
 
+> `VLMo` 模型代码实现是基于 `ViLT` 模型代码进行修改的，因此如果研究过 `ViLT` 代码实现的同学，对 `VLMo` 模型的代码实现应该比较亲切。
+
 ## 数据处理
 
 ## MOME（Mixture of Multimodal Experts）Transformer
@@ -476,6 +478,9 @@ class Attention(nn.Module):
 因此，我们首先用一幅图理清楚 `PyTorch Lightning` 预留的这套模版流程是怎么设计的:
 
 ![图片取至 [PytorchLightning : Model calls order](https://stackoverflow.com/questions/73985576/pytorchlightning-model-calls-order?utm_source=chatgpt.com)](VLMO/1.png)
+
+下面我们来分析一下 `VLMo` 模型代码的具体实现:
+
 
 
 
