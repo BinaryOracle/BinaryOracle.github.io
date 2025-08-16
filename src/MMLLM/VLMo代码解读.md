@@ -1210,151 +1210,279 @@ def compute_mlm(pl_module, batch):
 def infer_image(
     self,
     batch,
-    mask_image=False,              # 是否对图像进行mask（这里参数传入，但当前实现没用到）
-    image_token_type_idx=1,        # 图像token类型id（区分文本和图像的token type embedding）
-    image_embeds=None,             # 预先计算好的图像embedding（可选）
-    image_masks=None,              # 预先计算好的图像mask（可选）
+    mask_image=False,              # 是否对图像进行 mask（传参保留，但当前实现未使用）
+    image_token_type_idx=1,        # 图像 token type id（区分 text=0, image=1）
+    image_embeds=None,             # 预计算好的图像 embedding（可选）
+    image_masks=None,              # 预计算好的图像 mask（可选）
 ):
-    # 1. 确定 batch 中的图像 key
+    # ====== Step 1: 从 batch 取图像 ======
     imgkey = "image"
+    img = batch[imgkey][0]  # batch["image"] 是一个列表，取第 0 个元素作为输入图像
 
-    # 2. 从 batch 中取出图像数据（注意这里取 [0]，可能是因为 batch[imgkey] 是个列表/元组）
-    img = batch[imgkey][0]
-
-    # 3. 将图像输入 visual_embed，得到图像token embedding和对应的mask
+    # ====== Step 2: 图像编码（patch embedding + mask） ======
+    # visual_embed 会把图像切成 patch，映射到 embedding 空间，并返回对应的 mask
     image_embeds, image_masks = self.transformer.visual_embed(img)
 
-    # 4. 将 mask 转为 long 类型，并放到和图像相同的设备上
+    # ====== Step 3: mask 处理 ======
+    # 将 mask 转为 long 类型，并放到图像所在的设备上
     image_masks = image_masks.long().to(device=img.get_device())
 
-    # 5. 给图像embedding加上 token type embedding（值为 image_token_type_idx）
+    # ====== Step 4: 加上 token type embedding ======
+    # 给图像 token embedding 加上类型 embedding（值固定为 image_token_type_idx=1）
     image_embeds = image_embeds + self.token_type_embeddings(
         torch.full_like(image_masks, image_token_type_idx)
     )
 
-    # 6. 因为这里只有图像，所以 co_embeds / co_masks 就是图像的
-    co_embeds = image_embeds
-    co_masks = image_masks
-
-    # 7. 初始化 transformer 输入
+    # ====== Step 5: 初始化 transformer 输入 ======
+    co_embeds = image_embeds   # 融合输入 = 图像 embedding
+    co_masks = image_masks     # 融合 mask = 图像 mask
     x = co_embeds
-    all_hidden_states = []  # 存每一层的输出，方便后续做分支处理
+    all_hidden_states = []     # 存储每层 hidden states，供后续 VL block 使用
 
-    # 8. 计算相对位置偏置（relative position bias），用于注意力机制
+    # ====== Step 6: 计算相对位置偏置 ======
     relative_position_bias_list = self.get_rel_pos_bias(self.relative_position_index)
 
-    # 9. 依次经过 transformer 的每一层 block（这里是图像模式）
+    # ====== Step 7: 单模态图像编码（Image-only Blocks） ======
     for i, blk in enumerate(self.transformer.blocks):
         x = blk(
             x,
             mask=co_masks,
-            modality_type="image",  # 模态类型指定为 "image"
+            modality_type="image",  # 单模态模式 = 图像
             relative_position_bias=relative_position_bias_list[i]
         )
-        all_hidden_states.append(x)
+        all_hidden_states.append(x)  # 保存该层输出
 
-    # 10. 从指定层（vlffn_start_layer_index）开始，进行 VL-FFN（多模态融合的前馈网络）
-    #     注意这里虽然是图像推理，但 VL block 可能是专门用来做 cross-modal fine-tuning 的
+    # ====== Step 8: 多模态编码（VL-Blocks） ======
+    # 从 vlffn_start_layer_index-1 层的输出作为起点
     vlffn_hiddens = all_hidden_states[self.vlffn_start_layer_index - 1]
+    # 从指定层开始，走 VL 模式（Vision-Language 融合）
     for vlffn_index in range(self.vlffn_start_layer_index, self.num_layers):
         vlffn_hiddens = self.transformer.blocks[vlffn_index](
             vlffn_hiddens,
             mask=co_masks,
-            modality_type="vl",  # 模态类型变为 "vl"，表示融合层
+            modality_type="vl",  # 融合模式
             relative_position_bias=relative_position_bias_list[vlffn_index]
         )
 
-    # 11. 取最后一层图像 hidden states
-    vffn_hiddens = all_hidden_states[-1]
-
-    # 12. 对最后一层输出做 LayerNorm
-    vffn_hiddens = self.transformer.norm(vffn_hiddens)
-
-    # 13. 这里 text_feats 为空，因为这是纯图像推理
+    # ====== Step 9: 单模态最终输出 ======
+    vffn_hiddens = all_hidden_states[-1]       # 最后一层（图像模式）hidden states
+    vffn_hiddens = self.transformer.norm(vffn_hiddens)  # LayerNorm 归一化
     text_feats, image_feats = (
-        None,
-        vffn_hiddens,
+        None,          # 文本特征为空
+        vffn_hiddens,  # 图像特征序列
     )
 
-    # 14. 提取 ITC（Image-Text Contrastive）用的图像 CLS 特征
-    cls_feats = self.itc_image_proj(vffn_hiddens[:, 0])  # 取 CLS token
+    # ====== Step 10: ITC 用的图像 CLS 特征 ======
+    cls_feats = self.itc_image_proj(vffn_hiddens[:, 0])     # 取 [CLS] token
     cls_feats = cls_feats / cls_feats.norm(dim=-1, keepdim=True)  # L2 归一化
 
-    # 15. 提取 VL-FFN 层的 CLS 特征（跨模态表示）
-    vlffn_hiddens = self.transformer.norm(vlffn_hiddens)
-    cls_vlffn_feats = self.itc_vl_image_proj(vlffn_hiddens[:, 0])
+    # ====== Step 11: VL 融合后的 CLS 特征 ======
+    vlffn_hiddens = self.transformer.norm(vlffn_hiddens)    # 归一化
+    cls_vlffn_feats = self.itc_vl_image_proj(vlffn_hiddens[:, 0])  # 投影到 ITC 空间
     cls_vlffn_feats = cls_vlffn_feats / cls_vlffn_feats.norm(dim=-1, keepdim=True)
 
-    # 16. 返回推理结果字典
+    # ====== Step 12: 打包返回结果 ======
     ret = {
-        "text_feats": text_feats,           # 文本特征（这里为空）
-        "image_feats": image_feats,         # 图像特征（最后一层输出）
-        "cls_feats": cls_feats,             # ITC用的图像 CLS 特征
-        "cls_vlffn_feats": cls_vlffn_feats, # VL-FFN用的图像 CLS 特征
-        "raw_cls_feats": x[:, 0],           # 最后一次 forward 的原始 CLS token
-        "image_masks": image_masks,         # 图像mask
-        "text_labels": None,                # 文本标签（为空）
-        "text_ids": None,                    # 文本token ids（为空）
-        "text_masks": None,                  # 文本mask（为空）
+        "text_feats": text_feats,            # 文本特征（None）
+        "image_feats": image_feats,          # 图像特征（序列输出）
+        "cls_feats": cls_feats,              # 单模态 ITC CLS 特征
+        "cls_vlffn_feats": cls_vlffn_feats,  # 跨模态 ITC CLS 特征
+        "raw_cls_feats": x[:, 0],            # 原始 CLS token（最后一次 forward 的）
+        "image_masks": image_masks,          # 图像 mask
+        "text_labels": None,                 # 文本标签（空）
+        "text_ids": None,                    # 文本 ID（空）
+        "text_masks": None,                  # 文本 mask（空）
     }
 
     return ret
 ```
 
 ```python
-    def infer_text(
-        self,
-        batch,
-        mask_text=False,
-    ):
-        do_mlm = "_mlm" if mask_text else ""
-        text_ids = batch[f"text_ids{do_mlm}"]
-        text_labels = batch[f"text_labels{do_mlm}"]
-        text_masks = batch[f"text_masks"]
-        text_embeds = self.text_embeddings(text_ids)
-        text_embeds = text_embeds + self.token_type_embeddings(torch.zeros_like(text_masks))
+def infer_text(
+    self,
+    batch,
+    mask_text=False,
+):
+    # 如果开启了 Masked Language Modeling（MLM），就从 batch 里取对应的 "_mlm" 字段
+    do_mlm = "_mlm" if mask_text else ""
+    text_ids = batch[f"text_ids{do_mlm}"]        # 输入 token id 序列
+    text_labels = batch[f"text_labels{do_mlm}"]  # MLM 的标签（预测目标），正常推理时为 -100
+    text_masks = batch[f"text_masks"]            # attention mask（哪些位置有效）
 
-        co_embeds = text_embeds
-        co_masks = text_masks
+    # 将输入 token id 转换为 embedding 向量
+    text_embeds = self.text_embeddings(text_ids)
+    # 加上 token_type_embeddings（区分模态，这里 text 全是 0）
+    text_embeds = text_embeds + self.token_type_embeddings(torch.zeros_like(text_masks))
 
-        x = co_embeds
-        all_hidden_states = []
-        relative_position_bias_list = self.get_rel_pos_bias(self.text_relative_position_index)
+    # co_* 表示“当前模态（text）的输入”
+    co_embeds = text_embeds
+    co_masks = text_masks
 
-        for i, blk in enumerate(self.transformer.blocks):
-            x = blk(x, mask=co_masks, modality_type="text", relative_position_bias=relative_position_bias_list[i])
-            all_hidden_states.append(x)
-        
-        vlffn_hiddens = all_hidden_states[self.vlffn_start_layer_index-1]
-        for vlffn_index in range(self.vlffn_start_layer_index, self.num_layers):
-            vlffn_hiddens = self.transformer.blocks[vlffn_index](vlffn_hiddens, mask=co_masks, modality_type="vl", relative_position_bias=relative_position_bias_list[vlffn_index])
+    # 初始化 transformer 输入
+    x = co_embeds
+    all_hidden_states = []
 
-        lffn_hiddens = all_hidden_states[-1]
+    # 获取相对位置偏置（transformer attention 中的 bias）
+    relative_position_bias_list = self.get_rel_pos_bias(self.text_relative_position_index)
 
-        lffn_hiddens = self.transformer.norm(lffn_hiddens)
-        text_feats, image_feats = (
-            lffn_hiddens,
-            None,
+    # ====== 第一阶段：单模态 Transformer 编码 ======
+    # 遍历 transformer 的所有 Block，每个 block 按 "text" 模式运行
+    for i, blk in enumerate(self.transformer.blocks):
+        x = blk(
+            x,
+            mask=co_masks,
+            modality_type="text",  # 单模态模式（仅文本）
+            relative_position_bias=relative_position_bias_list[i]
+        )
+        all_hidden_states.append(x)  # 记录每层输出，供后续 VL block 使用
+    
+    # ====== 第二阶段：跨模态 Transformer 编码 ======
+    # 从 vlffn_start_layer_index-1 层的 hidden states 作为输入
+    vlffn_hiddens = all_hidden_states[self.vlffn_start_layer_index - 1]
+    # 再次遍历后半部分 block，但这次切换成 "vl" 模式（允许跨模态交互）
+    for vlffn_index in range(self.vlffn_start_layer_index, self.num_layers):
+        vlffn_hiddens = self.transformer.blocks[vlffn_index](
+            vlffn_hiddens,
+            mask=co_masks,
+            modality_type="vl",  # 融合模式（Vision-Language）
+            relative_position_bias=relative_position_bias_list[vlffn_index]
         )
 
-        cls_feats = self.itc_text_proj(lffn_hiddens[:, 0])
-        cls_feats = cls_feats / cls_feats.norm(dim=-1, keepdim=True)
+    # ====== 单模态输出 ======
+    lffn_hiddens = all_hidden_states[-1]  # 最后一层（text 模式）的输出
+    lffn_hiddens = self.transformer.norm(lffn_hiddens)  # 层归一化
+    text_feats, image_feats = (
+        lffn_hiddens,  # 单模态文本特征
+        None,          # 图像为空
+    )
 
-        vlffn_hiddens = self.transformer.norm(vlffn_hiddens)
-        cls_vlffn_feats = self.itc_vl_text_proj(vlffn_hiddens[:, 0])
-        cls_vlffn_feats = cls_vlffn_feats / cls_vlffn_feats.norm(dim=-1, keepdim=True)
+    # 提取 [CLS] token 的 embedding，并投影到对比学习空间（ITC）
+    cls_feats = self.itc_text_proj(lffn_hiddens[:, 0])
+    cls_feats = cls_feats / cls_feats.norm(dim=-1, keepdim=True)  # L2 归一化
 
-        ret = {
-            "text_feats": text_feats,
-            "image_feats": image_feats,
-            "cls_feats": cls_feats,
-            "cls_vlffn_feats": cls_vlffn_feats,
-            "raw_cls_feats": x[:, 0],
-            "image_masks": None,
-            "text_labels": text_labels,
-            "text_ids": text_ids,
-            "text_masks": text_masks,
-        }
+    # ====== 跨模态输出 ======
+    vlffn_hiddens = self.transformer.norm(vlffn_hiddens)  # 层归一化
+    # 提取 VL 融合后的 [CLS] embedding，用于 ITM/VQA 等任务
+    cls_vlffn_feats = self.itc_vl_text_proj(vlffn_hiddens[:, 0])
+    cls_vlffn_feats = cls_vlffn_feats / cls_vlffn_feats.norm(dim=-1, keepdim=True)
 
-        return ret
+    # ====== 打包返回结果 ======
+    ret = {
+        "text_feats": text_feats,        # 单模态文本特征序列
+        "image_feats": image_feats,      # 图像特征（None）
+        "cls_feats": cls_feats,          # 单模态 [CLS] 特征（ITC 用）
+        "cls_vlffn_feats": cls_vlffn_feats,  # 融合 [CLS] 特征（ITM/VQA 用）
+        "raw_cls_feats": x[:, 0],        # 原始 [CLS] 输出（未投影）
+        "image_masks": None,             # 图像 mask（None）
+        "text_labels": text_labels,      # 文本标签（MLM 或 -100）
+        "text_ids": text_ids,            # 文本输入 ID
+        "text_masks": text_masks,        # 文本 mask
+    }
+
+    return ret
 ```
+
+```python
+# The implementation of image-text contrastive refers to open_clip (https://github.com/mlfoundations/open_clip)
+def compute_itc(pl_module, batch, aggregate=True):
+    # 1. 分别对图像和文本做前向推理，提取 ITC 所需特征
+    infer_imag = pl_module.infer_image(batch, mask_image=False)   # 图像推理
+    infer_text = pl_module.infer_text(batch, mask_text=False)     # 文本推理
+
+    # 2. 取出图像和文本的 CLS 特征（单模态 ITC 特征）
+    image_features = infer_imag["cls_feats"]
+    text_features = infer_text["cls_feats"]
+
+    # 3. 取出 ITC 训练时的对比缩放因子（logit_scale），并取指数保证其 > 0
+    logit_scale = pl_module.logit_scale.exp().mean()
+
+    # 4. 取出经过 VL-FFN（跨模态融合层）的 CLS 特征（跨模态 ITC 特征）
+    image_vlffn_features = infer_imag["cls_vlffn_feats"]
+    text_vlffn_features = infer_text["cls_vlffn_feats"]
+
+    # 5. 跨模态 ITC 的缩放因子
+    logit_vl_scale = pl_module.logit_vl_scale.exp().mean()
+
+    # ========== 处理分布式训练下的负样本扩展 ==========
+    if aggregate:
+        ...   
+    else:
+        # 7. 单机训练时，直接计算相似度
+        logits_per_image = logit_scale * image_features @ text_features.t()
+        logits_per_text = logit_scale * text_features @ image_features.t()
+
+    # 8. 构造 ground truth 标签：第 i 个样本对应第 i 个正样本
+    ground_truth = torch.arange(len(logits_per_image)).long().to(device=logits_per_image.get_device())
+
+    # 9. 计算单模态 ITC loss（对称 CE，image→text + text→image）
+    itc_loss = (
+        F.cross_entropy(logits_per_image.float(), ground_truth)
+        + F.cross_entropy(logits_per_text.float(), ground_truth)
+    ) / 2
+
+    # 10. 计算跨模态 VL-FFN ITC loss (仅在分布式环境下启用)
+    itc_vlffn_loss = (
+        F.cross_entropy(logits_per_vlffn_image.float(), ground_truth)
+        + F.cross_entropy(logits_per_vlffn_text.float(), ground_truth)
+    ) / 2
+
+    # 11. 总 loss：两者平均再乘权重
+    itc_total_loss = (itc_loss + itc_vlffn_loss) * 0.5
+
+    # 12. 返回结果字典
+    ret = {
+        "itc_loss": itc_total_loss,                # 总 ITC 损失
+        "itc_i2t_logits": logits_per_image,        # image→text logits
+        "itc_t2i_logits": logits_per_text,         # text→image logits
+        "itc_labels": ground_truth,                # 标签
+        "itc_logit_scale": logit_scale,            # 单模态 logit 缩放因子
+        "itc_logit_vl_scale": logit_vl_scale,      # 跨模态 logit 缩放因子
+    }
+
+    # ========== 训练/验证过程中的日志记录 ==========
+    phase = "train" if pl_module.training else "val"
+
+    # 13. 记录 loss 和缩放因子
+    loss = getattr(pl_module, f"{phase}_itc_loss")(ret["itc_loss"])
+    scale = getattr(pl_module, f"{phase}_itc_logit_scale")(ret["itc_logit_scale"])
+
+    # 14. 单模态 ITC 准确率
+    i2t_acc = getattr(pl_module, f"{phase}_itc_i2t_accuracy")(ret["itc_i2t_logits"], ret["itc_labels"])
+    t2i_acc = getattr(pl_module, f"{phase}_itc_t2i_accuracy")(ret["itc_t2i_logits"], ret["itc_labels"])
+
+    pl_module.log(f"itc/{phase}/loss", loss)
+    pl_module.log(f"itc/{phase}/logit_scale", scale)
+    pl_module.log(f"itc/{phase}/i2t_accuracy", i2t_acc)
+    pl_module.log(f"itc/{phase}/t2i_accuracy", t2i_acc)
+
+    # 15. 跨模态 VL-FFN ITC 的日志记录
+    vl_scale = getattr(pl_module, f"{phase}_itc_vl_logit_scale")(ret["itc_logit_vl_scale"])
+    vl_i2t_acc = getattr(pl_module, f"{phase}_itc_vl_i2t_accuracy")(logits_per_vlffn_image, ret["itc_labels"])
+    vl_t2i_acc = getattr(pl_module, f"{phase}_itc_vl_t2i_accuracy")(logits_per_vlffn_text, ret["itc_labels"])
+
+    pl_module.log(f"itc/{phase}/vl_logit_scale", vl_scale)
+    pl_module.log(f"itc/{phase}/vl_i2t_accuracy", vl_i2t_acc)
+    pl_module.log(f"itc/{phase}/vl_t2i_accuracy", vl_t2i_acc)
+
+    return ret
+```
+
+> 跨模态 VL-FFN ITC Loss
+
+**1. 为什么只在分布式环境下启用？**
+
+* **代码实现逻辑**：在 `compute_itc` 中，VL-FFN ITC loss 只在 `aggregate=True` 分支下计算，而 `aggregate=True` 对应分布式环境；单机模式（`aggregate=False`）默认不计算 VL-FFN ITC。
+
+* **主要动机**：
+
+  1. **负样本数量**：ITC loss 对负样本依赖大，VL-FFN ITC 特征较特殊，单机 batch 内负样本有限，训练不稳定；分布式环境通过 `all_gather` 扩展了负样本数量。
+
+  2. **资源开销**：VL-FFN ITC 需要额外存储和计算 VL-FFN 特征，单机环境下显存/算力消耗较大；分布式环境充分利用多卡资源。
+
+* **理论上可在单机计算**：禁用只是实现选择，可根据需要在单机环境加入 VL-FFN ITC 计算，但可能效果受限。
+
+**2. 跨模态 VL-FFN ITC Loss 的作用**
+
+* **单模态对齐**：像 CLIP 那样，保证 encoder 自身就能学到基本的跨模态检索能力。
+
+* **跨模态对齐**：在融合层之后，进一步对齐“混合表征”，使得 VL Blocks 也被直接监督，而不是只靠 ITM/MLM 任务间接学习。
