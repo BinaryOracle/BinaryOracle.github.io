@@ -1496,5 +1496,124 @@ def compute_itc(pl_module, batch, aggregate=True):
         if "itm" in self.current_tasks:
             ret.update(objectives.compute_itm_hardneg(self, batch, ret["itc_i2t_logits"], ret["itc_t2i_logits"]))
 ```
+
 回顾 `VLMo` 模型的 `forward` 方法可知，再计算 `ITM` 学习目标之前，需要先完成 `ITC` 学习目标的计算，利用 `ITC` 提供的相似度矩阵完成 `hard negative examples` 的挖掘。
 
+```python
+def compute_itm_hardneg(pl_module, batch, sim_i2t, sim_t2i):
+    # 获取正负样本数量及 batch size
+    pos_len = batch["text_ids"].size(0)
+    neg_len = batch["text_ids"].size(0)
+    bsz = batch["text_ids"].size(0)
+    
+    # 构建 ITM 标签：正样本为 1，负样本为 0
+    itm_labels = torch.cat([torch.ones(pos_len), torch.zeros(neg_len), torch.zeros(neg_len)]).to(
+        pl_module.device
+    )
+
+    # 拷贝 batch，防止原 batch 被修改
+    batch = {k: v for k, v in batch.items()}
+    
+    # 正样本推理
+    infer_pos = pl_module.infer(batch, mask_text=False, mask_image=False)
+
+    batch_text_ids = infer_pos["text_ids"]
+    batch_text_masks = infer_pos["text_masks"]
+    batch_image = infer_pos["image"]
+
+    with torch.no_grad():
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+
+        # 初始化各 GPU 上的 tensor，用于收集所有 GPU 的 batch 数据
+        gathered_text_ids = [
+            torch.zeros_like(batch_text_ids) for _ in range(world_size)
+        ]
+        gathered_text_masks = [
+            torch.zeros_like(batch_text_masks) for _ in range(world_size)
+        ]
+        gathered_image = [
+            torch.zeros_like(batch_image) for _ in range(world_size)
+        ]
+
+        # 分布式收集所有 GPU 的 tensor（多 GPU 环境）
+        dist.all_gather(gathered_text_ids, batch_text_ids)
+        dist.all_gather(gathered_text_masks, batch_text_masks)
+        dist.all_gather(gathered_image, batch_image)
+
+        # 合并收集的 tensor，排除当前 GPU 自己的部分
+        all_text_ids = torch.cat(
+            [batch_text_ids]
+            + gathered_text_ids[:rank]
+            + gathered_text_ids[rank + 1 :]
+        )
+        all_text_masks = torch.cat(
+            [batch_text_masks]
+            + gathered_text_masks[:rank]
+            + gathered_text_masks[rank + 1 :]
+        )
+        all_image = torch.cat(
+            [batch_image]
+            + gathered_image[:rank]
+            + gathered_image[rank + 1 :]
+        )
+
+    with torch.no_grad():       
+        # 计算图像到文本、文本到图像的相似度权重
+        weights_i2t = F.softmax(sim_i2t[:bsz, :].float(), dim=1)
+        weights_t2i = F.softmax(sim_t2i[:bsz, :].float(), dim=1)
+
+        # 将对角线置零，避免选中正样本作为负样本
+        weights_i2t.fill_diagonal_(0)
+        weights_t2i.fill_diagonal_(0)
+    
+    # 为每个图像选择一个负文本
+    images_neg = []    
+    for b in range(bsz):
+        neg_idx = torch.multinomial(weights_t2i[b], 1).item()
+        images_neg.append(all_image[neg_idx])
+    images_neg = torch.stack(images_neg, dim=0)   
+
+    # 为每个文本选择一个负图像
+    text_ids_neg = []
+    text_masks_neg = []
+    for b in range(bsz):
+        neg_idx = torch.multinomial(weights_i2t[b], 1).item()
+        text_ids_neg.append(all_text_ids[neg_idx])
+        text_masks_neg.append(all_text_masks[neg_idx])
+
+    text_ids_neg = torch.stack(text_ids_neg, dim=0)     
+    text_masks_neg = torch.stack(text_masks_neg, dim=0)      
+
+    # 构建负样本 batch 并进行推理
+    batch_imgs_neg = {"image":[images_neg], "text_ids":batch["text_ids"], "text_labels":batch["text_labels"], "text_masks":batch["text_masks"]}
+    infer_imags_neg = pl_module.infer(batch_imgs_neg, mask_text=False, mask_image=False)
+    
+    batch_text_neg = {"image":batch["image"], "text_ids":text_ids_neg, "text_labels":batch["text_labels"], "text_masks":text_masks_neg}
+    infer_text_neg = pl_module.infer(batch_text_neg, mask_text=False, mask_image=False)
+
+    # 合并正负样本特征
+    all_cls_feats = torch.cat([infer_pos["cls_feats"], infer_imags_neg["cls_feats"], infer_text_neg["cls_feats"]], dim=0)
+
+    # 计算 ITM logits 和 loss
+    itm_logits = pl_module.itm_score(all_cls_feats)
+    itm_loss = F.cross_entropy(itm_logits, itm_labels.long())
+
+    # 构建返回字典
+    ret = {
+        "itm_loss": itm_loss,
+        "itm_logits": itm_logits,
+        "itm_labels": itm_labels,
+    }
+
+    # 根据训练/验证阶段计算并记录 loss 与 accuracy
+    phase = "train" if pl_module.training else "val"
+    loss = getattr(pl_module, f"{phase}_itm_loss")(ret["itm_loss"])
+    acc = getattr(pl_module, f"{phase}_itm_accuracy")(
+        ret["itm_logits"], ret["itm_labels"]
+    )
+    pl_module.log(f"itm/{phase}/loss", loss)
+    pl_module.log(f"itm/{phase}/accuracy", acc)
+
+    return ret
+```
