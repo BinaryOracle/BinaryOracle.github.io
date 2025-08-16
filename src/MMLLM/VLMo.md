@@ -129,7 +129,7 @@ VLMO 采用三种联合预训练任务：
 
 ## Method
 
-![](VLMo/5.png)
+![](VLMO/5.png)
 
 给定图像-文本对，VLMO 通过 MOME Transformer 网络获得图像、文本以及图像-文本对的表示。如图 1 所示，统一的预训练通过以下任务优化共享的 MOME Transformer：
 
@@ -238,7 +238,7 @@ $$
 
 ### 分阶段预训练（Stagewise Pre-Training）
 
-![](VLMo/6.png)
+![](VLMO/6.png)
 
 * 利用大规模图像-only 和文本-only 数据提升模型能力（图 2）。
 
@@ -252,7 +252,7 @@ $$
 
 ### 下游任务微调
 
-![](VLMo/7.png)
+![](VLMO/7.png)
 
 **视觉-语言分类**
 
