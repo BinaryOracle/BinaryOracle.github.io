@@ -1486,3 +1486,8 @@ def compute_itc(pl_module, batch, aggregate=True):
 * **单模态对齐**：像 CLIP 那样，保证 encoder 自身就能学到基本的跨模态检索能力。
 
 * **跨模态对齐**：在融合层之后，进一步对齐“混合表征”，使得 VL Blocks 也被直接监督，而不是只靠 ITM/MLM 任务间接学习。
+
+#### Image-Text Matching
+
+第三个学习目标是 ITM 任务，该任务的学习目标是通过硬负样本策略，将正匹配的图文对与相似但不匹配的负样本区分开来，从而训练模型学会细粒度跨模态对齐。
+
