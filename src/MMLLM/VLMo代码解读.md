@@ -1491,3 +1491,10 @@ def compute_itc(pl_module, batch, aggregate=True):
 
 第三个学习目标是 ITM 任务，该任务的学习目标是通过硬负样本策略，将正匹配的图文对与相似但不匹配的负样本区分开来，从而训练模型学会细粒度跨模态对齐。
 
+```python
+        # Image Text Matching with global hard negative, must use with itc
+        if "itm" in self.current_tasks:
+            ret.update(objectives.compute_itm_hardneg(self, batch, ret["itc_i2t_logits"], ret["itc_t2i_logits"]))
+```
+回顾 `VLMo` 模型的 `forward` 方法可知，再计算 `ITM` 学习目标之前，需要先完成 `ITC` 学习目标的计算，利用 `ITC` 提供的相似度矩阵完成 `hard negative examples` 的挖掘。
+
