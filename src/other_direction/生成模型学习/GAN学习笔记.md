@@ -572,3 +572,12 @@ for epoch in range(opt.n_epochs):
 6. 效果
 
 ![](GAN/1.png)
+
+## 推荐资料
+
+![互怼的艺术：从零直达WGAN-GP](https://kexue.fm/archives/4439)
+
+![能量视角下的GAN模型（一）：GAN＝“挖坑”＋“跳坑”](https://kexue.fm/archives/6316#%E6%8A%8AGAN%E5%86%99%E4%B8%8B%E6%9D%A5)
+
+![WGAN的成功，可能跟Wasserstein距离没啥关系](https://kexue.fm/archives/8244)
+
