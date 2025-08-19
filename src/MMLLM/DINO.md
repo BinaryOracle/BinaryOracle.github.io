@@ -20,4 +20,7 @@ author:
 > 代码链接: [https://github.com/facebookresearch/dino](https://github.com/facebookresearch/dino)
 
 
+## 代码解析
+
+![](dino/1.gif)
 

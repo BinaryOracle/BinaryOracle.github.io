@@ -690,6 +690,111 @@ Tensor.uniform_(from=0, to=1)
 
 3. 加上 _ 说明是原地修改：直接在原张量上进行操作，不创建新张量。
 
+### torch.unique_consecutive
+
+**作用**：返回输入张量中 **连续不重复的元素**，类似于 NumPy 的 `np.unique`，但它只去掉 **相邻重复值**，而不是全局去重。
+
+```python
+torch.unique_consecutive(
+    input,
+    return_inverse=False,
+    return_counts=False,
+    dim=None
+) -> (Tensor, Optional[Tensor], Optional[Tensor])
+```
+
+* **`input`**：输入张量。
+
+* **`return_inverse`**：如果为 `True`，会额外返回一个张量，表示每个元素在唯一值张量中的索引。
+
+* **`return_counts`**：如果为 `True`，会额外返回每个唯一值的 **连续出现次数**。
+
+* **`dim`**：指定操作的维度。如果为 `None`，默认会展平为 1D 处理。
+
+
+**示例1**:
+
+```python
+import torch
+
+x = torch.tensor([1, 1, 2, 2, 3, 1, 1])
+out = torch.unique_consecutive(x)
+print(out)  
+# tensor([1, 2, 3, 1])
+```
+
+> 这里没有去掉最后那个 `1`，因为它和前面的 `3` 不相邻。
+
+**示例2：返回计数**: 
+
+```python
+out, counts = torch.unique_consecutive(x, return_counts=True)
+print(out)     # tensor([1, 2, 3, 1])
+print(counts)  # tensor([2, 2, 1, 2])
+```
+
+**示例3: 返回反向索引**:
+
+```python
+out, inverse = torch.unique_consecutive(x, return_inverse=True)
+print(out)      # tensor([1, 2, 3, 1])
+print(inverse)  # tensor([0, 0, 1, 1, 2, 3, 3])
+```
+
+**示例4: 指定维度**:
+
+```python
+x = torch.tensor([[1, 1, 2],
+                  [1, 2, 2],
+                  [3, 3, 3]])
+out = torch.unique_consecutive(x, dim=0)
+print(out)
+# tensor([[1, 1, 2],
+#         [1, 2, 2],
+#         [3, 3, 3]])
+```
+
+> 这里按 **行** 去重，只要相邻两行完全相同就会合并。
+
+### torch.cumsum
+
+**作用**：对张量沿指定维度做 **累加求和**（cumulative sum），返回一个新的张量。
+
+```python
+torch.cumsum(input, dim, *, dtype=None, out=None) -> Tensor
+```
+
+* **`input`**: 输入张量
+
+* **`dim`**: 沿着哪个维度计算累积和
+
+* **`dtype`**: 指定输出数据类型（可选），如果不指定就保持输入 dtype
+
+* **`out`**: 输出张量（可选）
+
+**返回值**: 返回一个和 `input` 形状相同的张量，元素是按 `dim` 累加后的值。
+
+**示例1: 一维张量**
+
+```python
+import torch
+x = torch.tensor([1, 2, 3, 4])
+y = torch.cumsum(x, dim=0)
+print(y)  
+# tensor([ 1,  3,  6, 10])
+```
+
+**示例2: 二维张量**
+
+```python
+x = torch.tensor([[1, 2, 3],
+                  [4, 5, 6]])
+y = torch.cumsum(x, dim=0)  # 沿着行方向
+print(y)
+# tensor([[ 1,  2,  3],
+#         [ 5,  7,  9]])
+```
+
 ## 模型
 
 ### ResNet18
