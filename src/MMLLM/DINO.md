@@ -19,6 +19,56 @@ author:
 > 论文链接: [Emerging Properties in Self-Supervised Vision Transformers](https://arxiv.org/abs/2104.14294)
 > 代码链接: [https://github.com/facebookresearch/dino](https://github.com/facebookresearch/dino)
 
+## 引言
+
+Vision Transformer（ViT）近期成为卷积神经网络（convnets）的替代方案，在视觉识别任务中表现出竞争力。但与 convnets 相比，ViT 存在以下不足：
+
+* 计算开销更大
+
+* 需要更多训练数据
+
+* 提取的特征不具备独特优势
+
+研究者提出一个问题：是否是 **监督式预训练** 限制了 Transformer 在视觉中的潜力？在 NLP 任务中，Transformer 的成功很大程度上得益于 **自监督学习**（如 BERT 的掩码预测、GPT 的语言建模），这些预训练目标利用上下文信息提供了更丰富的学习信号，而不仅仅是单一标签。相比之下，图像监督学习往往把丰富的视觉信息压缩为一个类别标签，导致潜在信息损失。因此，研究者探索 **自监督学习是否能为 ViT 带来新的特性**。
+
+论文通过研究自监督预训练对 ViT 特征的影响，得到以下核心结论（部分如图1所示）：
+
+![](dino/5.png)
+
+* **显式的语义分割信息**: 自监督 ViT 特征中会自然出现场景布局与物体边界，这些信息可以直接在最后一个 Transformer block 的自注意力模块中读取。相比之下，监督 ViT 和 convnets 并不显式包含这些特征。
+
+* **优异的 k-NN 分类性能**: 在完全不做微调、线性分类器训练或数据增强的情况下，单纯使用最近邻分类器（k-NN），自监督 ViT 在 ImageNet 上可达到 **78.3% top-1** 准确率。
+
+* **分割掩码的普遍性与关键条件**: 分割掩码的涌现似乎是自监督方法的普遍属性，但要想在 k-NN 上取得良好性能，必须结合以下组件：
+
+  * **动量编码器**（momentum encoder）
+
+  * **多视角裁剪增强**（multi-crop augmentation）
+
+* **小 patch 的重要性**: 使用更小的 patch 能显著提升 ViT 特征质量。
+
+基于以上发现，作者提出了 **DINO**（self-distillation with no labels），它可以被理解为一种 **无标签的知识蒸馏**：
+
+* 学生网络通过交叉熵损失，直接预测教师网络（由动量编码器构建）的输出。
+
+* 为避免模型塌缩，仅需在教师输出上应用 **居中（centering）与锐化（sharpening）**。
+
+* 相比之下，其他方法使用的复杂组件（如 predictor、先进归一化方式或对比损失）并未带来额外收益。
+
+**性能表现**：
+
+* 在 ImageNet 线性分类基准上，DINO + ViT-Base（小 patch）达到 **80.1% top-1**，显著超越之前的自监督方法。
+
+* 在 ResNet-50 上，DINO 的表现与最新的自监督系统相当。
+
+**灵活性与通用性**：
+
+* DINO 同时适用于 ViT 和 convnets，无需对架构或归一化方式做修改。
+
+**计算效率**：
+
+* 在资源有限的场景下，仅需 2 台 8-GPU 服务器训练 3 天，DINO + ViT 就能在 ImageNet 线性基准上达到 **76.1% top-1**，超越了同规模 convnets 的自监督系统，同时计算开销更低。
+
 
 ## 代码解析
 
@@ -132,7 +182,21 @@ class DataAugmentationDINO(object):
 
 ---
 
+由于 `DINO` 采用多视角图像输入，对于学生模型来说，一个批次图像经过增强后，会得到 `2+n` 个来自不同视角下的批次图像:
 
+![](dino/2.png)
+
+为了同时处理多视角图像输入，`DINO` 使用了 `装饰器模式` ，设计 `MultiCropWrapper` 类来将输入图像批次列表按照分辨率进行分组：
+
+![](dino/4.png)
+
+> [0,2) 区间对应 `224` 分辨率 ， [2,6) 对应 `96` 分辨率
+
+将分辨率相同的批次合并后输入模型，拼接结果:
+
+![](dino/3.png)
+
+完整代码实现如下:
 
 ```python
 class MultiCropWrapper(nn.Module):
