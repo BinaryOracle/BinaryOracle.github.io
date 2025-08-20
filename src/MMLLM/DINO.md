@@ -139,6 +139,8 @@ $$
 
 ---
 
+![](dino/6.png)
+
 DINO在此基础上引入 **多视角（multi-crop）策略**：
 
 * 从同一张图片中生成多个视角（裁剪），形成集合 $V$。
@@ -389,4 +391,248 @@ class MultiCropWrapper(nn.Module):
 
         # 所有特征拼接完成后，送入 head 得到最终表示
         return self.head(output)
+```
+
+```python
+def train_dino(args):
+    """
+    在单进程下运行完整的 DINO 训练循环
+
+    步骤：
+    1. 构建多视图增强 (Multi-crop augmentations) 和数据集 / DataLoader
+    2. 构建学生 (Student) / 教师 (Teacher) 网络，并附加 DINO 头
+    3. 用学生初始化教师网络，教师梯度冻结
+    4. 创建损失函数、优化器及余弦调度器 (学习率、权重衰减、EMA momentum)
+    5. 标准 float32 训练循环，每轮迭代更新 EMA 教师参数
+    """
+    # =====================
+    # 1. 数据准备
+    # =====================
+    # 构建 DINO 的多视图增强策略：2 个全局裁剪 + N 个局部裁剪
+    transform = DataAugmentationDINO(
+        args.global_crops_scale,
+        args.local_crops_scale,
+        args.local_crops_number,
+    )
+
+    # 使用 ImageFolder 数据集，要求目录结构为：
+    # data_path/class_x/*.jpg
+    # ImageFolder 会根据子文件夹名自动生成 class 索引，并返回 (PIL image, label)
+    dataset = datasets.ImageFolder(args.data_path, transform=transform)
+
+    # 创建 DataLoader
+    data_loader = torch.utils.data.DataLoader(
+        dataset,
+        shuffle=True,              # 打乱数据顺序
+        batch_size=args.batch_size,
+        num_workers=args.num_workers, # 多线程加载数据
+        pin_memory=True,           # CUDA 加速
+        drop_last=True,            # 丢弃最后不足 batch 的数据
+    )
+    print(f"数据加载完成: {len(dataset)} 张图片. Batch size: {args.batch_size}")
+
+    # =====================
+    # 2. 构建学生/教师网络
+    # =====================
+    # 使用相同的骨干网络 (Backbone) 构建学生和教师，并附加 DINO head
+    student_backbone = vits.__dict__[args.arch](
+        patch_size=args.patch_size,
+        drop_path_rate=args.drop_path_rate  # DropPath 用于正则化
+    )
+    teacher_backbone = vits.__dict__[args.arch](patch_size=args.patch_size)
+    embed_dim = student_backbone.embed_dim  # ViT 输出 embedding 维度
+
+    # 构建学生网络 (Student) + DINO head
+    student = utils.MultiCropWrapper(
+        student_backbone,
+        DINOHead(
+            embed_dim,
+            args.out_dim,
+            use_bn=args.use_bn_in_head,  # 是否在 head 使用 BN
+            norm_last_layer=args.norm_last_layer,  # 是否规范化最后一层
+        )
+    )
+
+    # 构建教师网络 (Teacher) + DINO head
+    teacher = utils.MultiCropWrapper(
+        teacher_backbone,
+        DINOHead(embed_dim, args.out_dim, args.use_bn_in_head),
+    )
+
+    # =====================
+    # 3. 初始化教师网络
+    # =====================
+    # 教师网络初始参数与学生网络相同
+    teacher.load_state_dict(student.state_dict())
+
+    # 教师网络不参与梯度更新，仅通过 EMA 更新参数
+    for p in teacher.parameters():
+        p.requires_grad = False
+
+    print(f"学生/教师网络构建完成: arch={args.arch}, embed_dim={embed_dim}")
+
+    # =====================
+    # 4. 构建 DINO 损失函数
+    # =====================
+    # DINOLoss 接收学生输出、教师输出和当前 epoch 信息
+    dino_loss = DINOLoss(
+        args.out_dim,
+        args.local_crops_number + 2,  # 总视图数量: 2 个全局 + N 个局部
+        args.warmup_teacher_temp,
+        args.teacher_temp,
+        args.warmup_teacher_temp_epochs,
+        args.epochs,
+    )
+
+    # =====================
+    # 5. 构建优化器
+    # =====================
+    # 对参数进行分组：对 bias / norm 等不使用 weight decay
+    params_groups = utils.get_params_groups(student)
+    optimizer = torch.optim.AdamW(params_groups)
+
+    # =====================
+    # 6. 学习率、权重衰减、EMA momentum 调度器
+    # =====================
+    # 使用余弦调度器，按迭代次数调整
+    base_lr = args.lr * (args.batch_size / 256.0)  # 学习率按 batch_size 线性缩放
+    lr_schedule = utils.cosine_scheduler(
+        base_lr, args.min_lr, args.epochs, len(data_loader),
+        warmup_epochs=args.warmup_epochs,
+    )
+    wd_schedule = utils.cosine_scheduler(
+        args.weight_decay, args.weight_decay_end, args.epochs, len(data_loader),
+    )
+    momentum_schedule = utils.cosine_scheduler(
+        args.momentum_teacher, 1.0, args.epochs, len(data_loader)
+    )
+
+    # =====================
+    # 7. 训练循环
+    # =====================
+    for epoch in range(args.epochs):
+
+        student.train()  # 学生网络训练模式
+        teacher.train()  # 教师网络不更新梯度，但 train 模式保持 BN 行为
+
+        for it, (images, _) in enumerate(data_loader):
+            # ---------------------
+            # 每次迭代更新学习率和权重衰减
+            # ---------------------
+            gid = it + epoch * len(data_loader)  # 全局迭代索引
+            for i, pg in enumerate(optimizer.param_groups):
+                pg["lr"] = lr_schedule[gid]
+                if i == 0:
+                    pg["weight_decay"] = wd_schedule[gid]
+
+            # ---------------------
+            # 前向计算 + 损失
+            # 教师网络只看 2 个全局裁剪
+            # 学生网络看所有裁剪 (2 个全局 + N 个局部)
+            # ---------------------
+            teacher_output = teacher(images[:2])   # 仅前 2 个全局裁剪
+            student_output = student(images)       # 所有裁剪
+            loss = dino_loss(student_output, teacher_output, epoch)
+
+            # ---------------------
+            # 反向传播 (仅学生网络)
+            # ---------------------
+            optimizer.zero_grad()
+            loss.backward()
+
+            # 训练初期冻结学生网络最后一层
+            utils.cancel_gradients_last_layer(epoch, student, args.freeze_last_layer)
+
+            # 更新学生网络参数
+            optimizer.step()
+
+            # ---------------------
+            # EMA 更新教师网络参数
+            # ---------------------
+            with torch.no_grad():
+                m = momentum_schedule[gid]  # 当前迭代 EMA momentum
+                for ps, pt in zip(student.parameters(), teacher.parameters()):
+                    pt.data.mul_(m).add_((1 - m) * ps.detach().data)
+```
+
+```python
+class DINOLoss(nn.Module):
+    """
+    DINO 损失函数类，支持温度调度、中心化(center)和多视图(crop)处理。
+
+    功能说明：
+    - 对教师输出进行温度锐化(sharpening)，并维护一个移动中心(center)
+      来稳定训练。
+    - 计算跨视图的交叉熵损失：每个教师的全局视图监督所有学生视图，
+      但不监督与其索引相同的学生视图。
+    """
+    def __init__(self, out_dim, ncrops, warmup_teacher_temp, teacher_temp,
+                 warmup_teacher_temp_epochs, nepochs, student_temp=0.1,
+                 center_momentum=0.9):
+        super().__init__()
+        self.student_temp = student_temp  # 学生输出 softmax 的温度
+        self.center_momentum = center_momentum  # 中心更新的 EMA 动量
+        self.ncrops = ncrops  # 输入图像裁剪数量
+        self.register_buffer("center", torch.zeros(1, out_dim))  # 初始化教师输出中心向量
+
+        # 教师温度调度表
+        # 前 warmup_teacher_temp_epochs 采用线性增长，从 warmup_teacher_temp 到 teacher_temp
+        # 后续 epoch 固定为 teacher_temp
+        self.teacher_temp_schedule = np.concatenate((
+            np.linspace(warmup_teacher_temp, teacher_temp, warmup_teacher_temp_epochs),
+            np.ones(nepochs - warmup_teacher_temp_epochs) * teacher_temp
+        ))
+
+    def forward(self, student_output, teacher_output, epoch):
+        """
+        计算跨视图交叉熵损失。
+
+        输入：
+        - student_output: 学生模型输出，包含所有裁剪的拼接结果
+        - teacher_output: 教师模型输出，仅包含全局视图
+        - epoch: 当前训练轮数，用于教师温度调度
+
+        处理流程：
+        1. 学生输出按温度缩放并拆分为每个裁剪的输出
+        2. 教师输出减去中心并进行温度锐化
+        3. 每个教师视图监督除同索引学生视图外的所有学生视图
+        """
+        # 学生输出按温度缩放，并拆分为 ncrops 个裁剪
+        student_out = student_output / self.student_temp
+        student_out = student_out.chunk(self.ncrops)
+
+        # 教师输出：减去中心并进行温度锐化
+        temp = self.teacher_temp_schedule[epoch]  # 当前 epoch 的教师温度
+        teacher_out = F.softmax((teacher_output - self.center) / temp, dim=-1)
+        teacher_out = teacher_out.detach().chunk(2)  # 仅两张全局裁剪用于教师监督
+
+        total_loss = 0  # 总损失
+        n_loss_terms = 0  # 用于计算平均损失的项数
+        # 遍历每个教师视图
+        for iq, q in enumerate(teacher_out):
+            # 遍历每个学生视图
+            for v in range(len(student_out)):
+                if v == iq:  # 不监督同索引的学生视图
+                    continue
+                # 计算交叉熵损失
+                loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
+                total_loss += loss.mean()
+                n_loss_terms += 1
+        # 对所有损失求平均
+        total_loss /= n_loss_terms
+
+        # 更新教师输出中心
+        self.update_center(teacher_output)
+        return total_loss
+
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        """
+        使用当前 batch 教师输出更新 EMA 中心
+
+        公式：
+        center = center * center_momentum + batch_center * (1 - center_momentum)
+        """
+        batch_center = teacher_output.mean(dim=0, keepdim=True)  # 计算 batch 中心
+        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 ```
