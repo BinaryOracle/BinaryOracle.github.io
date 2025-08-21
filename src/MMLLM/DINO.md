@@ -5,7 +5,7 @@ category:
   - 多模态
 tag:
   - 多模态
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-08-17
 author:
@@ -559,6 +559,8 @@ class MultiCropWrapper(nn.Module):
         return self.head(output)
 ```
 
+下面我们来看 `DINO` 模型完整的训练流程:
+
 ```python
 def train_dino(args):
     """
@@ -720,6 +722,8 @@ def train_dino(args):
                 for ps, pt in zip(student.parameters(), teacher.parameters()):
                     pt.data.mul_(m).add_((1 - m) * ps.detach().data)
 ```
+
+最后来看一下 `DINOLoss` 类的实现:
 
 ```python
 class DINOLoss(nn.Module):
