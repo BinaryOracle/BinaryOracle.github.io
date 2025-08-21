@@ -806,3 +806,6 @@ class DINOLoss(nn.Module):
         batch_center = teacher_output.mean(dim=0, keepdim=True)  # 计算 batch 中心
         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 ```
+
+DINO 不对同索引的学生视图进行监督，是为了 避免学生只学到平凡的输入匹配，强制学生跨视图对齐，才能让表示真正学到 语义一致性，而不是表面相似性。
+
