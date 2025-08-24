@@ -470,3 +470,24 @@ tensor([[0, 1, 2, 3],
 tensor([[ 8,  9, 10, 11],
         [12, 13, 14, 15]])
 ```
+
+### torch.randperm
+
+`torch.randperm(n)` 返回一个长度为 `n` 的一维张量，包含 `0 ~ n-1` 的整数，顺序被随机打乱。常用于随机打乱索引，例如：
+
+```python
+idx = torch.randperm(5)
+# 可能输出: tensor([3, 0, 4, 1, 2])
+```
+
+### torch.randint
+
+`torch.randint(low, high, size)` 返回在 `[low, high)` 区间内随机生成整数的张量，形状由 `size` 指定。示例：
+
+```python
+x = torch.randint(0, 10, (3, 2))
+# 可能输出: tensor([[7, 1],
+#                   [3, 9],
+#                   [0, 4]])
+```
+

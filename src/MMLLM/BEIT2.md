@@ -49,6 +49,10 @@ author:
 
 ![](beit2/1.png)
 
+#### 码本_EMA
+
+
+
 #### 向量量化器
 
 向量量化器负责将连续的视觉特征映射到离散的视觉 `token`，该过程借助内部维护的 `cookbook` 完成，本节我们先来详细解析一下它的实现逻辑:
@@ -92,4 +96,24 @@ class NormEMAVectorQuantizer(nn.Module):
             self.register_buffer('cluster_size', torch.zeros(n_embed))
 ```
 
+```python
+    @torch.jit.ignore
+    def init_embed_(self, data):
+        """
+        使用 k-means 对 codebook 进行初始化。
+        只会执行一次，之后 self.initted 会标记为 True。
+        """
+        if self.initted:
+            return
+        print("Performing Kmeans init for codebook")
 
+        # 在输入数据 data 上运行 k-means
+        embed, cluster_size = kmeans(data, self.num_tokens, 10, use_cosine_sim = True)
+
+        # 把 k-means 得到的聚类中心赋值给 codebook
+        self.weight.data.copy_(embed)
+        # 把每个簇的样本数存下来
+        self.cluster_size.data.copy_(cluster_size)
+        # 标记为已初始化
+        self.initted.data.copy_(torch.Tensor([True]))
+```
