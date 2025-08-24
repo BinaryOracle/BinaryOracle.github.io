@@ -491,3 +491,81 @@ x = torch.randint(0, 10, (3, 2))
 #                   [0, 4]])
 ```
 
+### torch.bincount
+
+`torch.bincount(input, weights=None, minlength=0)` 用于统计 **非负整数张量** `input` 中每个整数出现的次数，返回一个一维张量。
+
+**参数**:
+
+* `input`：非负整数张量，一维。
+
+* `weights`（可选）：与 `input` 同长度的浮点张量，用于加权计数。
+
+* `minlength`（可选）：输出张量的最小长度，如果统计结果长度小于 `minlength`，在末尾补 0。
+
+**返回值**:
+
+* 一维张量 `counts`，`counts[i]` 表示整数 `i` 在 `input` 中的出现次数（或加权和，如果指定 `weights`）。
+
+**例如:**
+
+**普通计数：**
+
+```python
+x = torch.tensor([0, 1, 1, 3])
+torch.bincount(x)
+# 输出: tensor([1, 2, 0, 1])
+```
+
+**加权计数：**
+
+```python
+x = torch.tensor([0, 1, 1, 3])
+w = torch.tensor([0.5, 1.0, 2.0, 1.5])
+torch.bincount(x, weights=w)
+# 输出: tensor([0.5, 3.0, 0.0, 1.5])
+```
+
+**指定最小长度：**
+
+```python
+x = torch.tensor([0, 1, 1])
+torch.bincount(x, minlength=5)
+# 输出: tensor([1, 2, 0, 0, 0])
+```
+
+### Tensor.new_zeros
+
+`Tensor.new_zeros(*size, dtype=None, device=None)` 是 PyTorch 的一个 **张量创建方法**，它根据已有张量的属性创建一个全零张量。
+
+**作用**:
+
+* 生成形状为 `size` 的全零张量。
+
+* 张量会和调用它的原张量 **在同一设备上**（CPU/GPU），并且默认继承原张量的数据类型，除非通过 `dtype` 指定。
+
+**例子**:
+
+```python
+x = torch.randn(3, 4, device='cuda')   # 原张量在 GPU
+y = x.new_zeros(2, 5)                  # 在 GPU 上创建 2x5 的全零张量
+print(y.device)  # 输出: cuda:0
+```
+
+### tensor.scatter_add_
+
+```python
+tensor.scatter_add_(dim, index, src)
+```
+
+* **dim**：指定沿哪一维累加。
+
+  * 0 表示按行累加（不同样本累加到不同的簇行）。
+ 
+  * 1 表示按列累加（按列索引累加元素）。
+
+* **index**：与 `src` 同形状的整数张量，表示 `src` 中的每个元素要加到目标张量的哪个位置。
+
+  * 如果 `dim=0`，`index[i,j]` 表示 `src[i,j]` 要加到 `tensor[index[i,j], j]`。
+
+  * 如果 `dim=1`，`index[i,j]` 表示 `src[i,j]` 要加到 `tensor[i, index[i,j]]`。

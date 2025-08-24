@@ -117,3 +117,62 @@ class NormEMAVectorQuantizer(nn.Module):
         # 标记为已初始化
         self.initted.data.copy_(torch.Tensor([True]))
 ```
+
+```python
+def kmeans(samples, num_clusters, num_iters = 10, use_cosine_sim = False):
+    # samples: 输入样本，形状 (N, D)，N 是样本数，D 是维度
+    # num_clusters: 聚类簇数，即要分成多少类
+    # num_iters: k-means 的迭代次数
+    # use_cosine_sim: 是否用余弦相似度（默认用欧氏距离）
+
+    # 提取样本维度、数据类型和设备
+    dim, dtype, device = samples.shape[-1], samples.dtype, samples.device
+
+    # 从样本中随机选取 num_clusters 个向量作为初始中心
+    means = sample_vectors(samples, num_clusters)
+
+    # 重复迭代更新聚类中心
+    for _ in range(num_iters):
+        if use_cosine_sim:
+            # 使用余弦相似度：直接点积即可（因为向量一般做过 l2norm）
+            # 结果 shape: (N, K)，表示每个样本和每个中心的相似度
+            dists = samples @ means.t()
+        else:
+            # 使用欧氏距离： (x - μ)^2
+            # diffs: (N, 1, D) - (1, K, D) = (N, K, D)
+            diffs = rearrange(samples, 'n d -> n () d') \
+                    - rearrange(means, 'c d -> () c d')
+            # 计算平方距离并取负号（因为后面要用 max 来找最近中心）
+            dists = -(diffs ** 2).sum(dim = -1)   # shape: (N, K)
+
+        # 找到每个样本最近的中心（或相似度最大的中心）
+        # buckets: (N,) 每个样本对应的簇编号
+        buckets = dists.max(dim = -1).indices
+
+        # 统计每个簇的样本数量
+        bins = torch.bincount(buckets, minlength = num_clusters)  # (K,)
+        # 标记哪些簇没有分配到样本（空簇）
+        zero_mask = bins == 0
+        # 防止除以 0，把空簇的计数临时设为 1
+        bins_min_clamped = bins.masked_fill(zero_mask, 1)
+
+        # 初始化新的簇中心 (K, D)，全部为 0
+        new_means = buckets.new_zeros(num_clusters, dim, dtype = dtype)
+        # 把属于同一簇的样本向量加到对应的中心上
+        # repeat(buckets, 'n -> n d', d = dim): 把 (N,) 扩展成 (N, D)，方便 scatter_add
+        new_means.scatter_add_(0, repeat(buckets, 'n -> n d', d = dim), samples)
+        # 除以该簇的样本数，得到新的簇中心
+        new_means = new_means / bins_min_clamped[..., None]
+
+        # 如果用余弦相似度，记得对中心做 l2norm 归一化
+        if use_cosine_sim:
+            new_means = l2norm(new_means)
+
+        # 更新簇中心：
+        # - 如果该簇是空簇（zero_mask=True），保留旧的中心
+        # - 否则更新为新的中心
+        means = torch.where(zero_mask[..., None], means, new_means)
+
+    # 返回最终的簇中心和每个簇的样本数
+    return means, bins
+```
