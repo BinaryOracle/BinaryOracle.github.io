@@ -263,6 +263,8 @@ print(list(label_counts.elements())) # [0, 0, 0, 1, 1, 2, 2, 2, 2]
 
 ## pytorch 内置 采样库
 
+### WeightedRandomSampler
+
 `WeightedRandomSampler` 是 **PyTorch** 提供的一个采样器，用于在构建 `DataLoader` 时 **按权重采样样本**，常用于类别不平衡的数据集。
 
 ```python
