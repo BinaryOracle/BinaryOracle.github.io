@@ -43,6 +43,44 @@ author:
 
 训练完成后，VQ-KD 的编码器被用作 BEIT V2 的语义视觉分词器，离散 token 作为监督信号进行 MIM 预训练。引入 **图像块聚合策略**，让 \[CLS] token 聚合全局信息，解决传统 MIM 过度关注局部块重建而忽略全局表示的问题。
 
+## 方法
+
+### 预训练阶段一:  向量量化知识蒸馏算法用于d-VAE预训练
+
+![](beit2/1.png)
+
+BEIT V2 继承了 BEIT 的掩码图像建模（Masked Image Modeling）框架，其核心思想是将每张图像通过视觉 tokenizer 转换为一组离散的视觉 token，然后训练模型去恢复被遮挡的 token。每个 token 对应图像中的一个 patch，从而实现对局部图像信息的建模（如图 2 所示）。训练过程中，引入了向量量化知识蒸馏（VQ-KD）算法，用于训练视觉 tokenizer，使其能够有效将图像映射到离散编码。
+
+图像表示部分，输入图像 $x \in R^{H \times W \times C}$ 会被划分为 $N = HW / P^2$ 个 patch ${x_p^i}_{i=1}^N$，每个 patch 大小为 $(P, P)$，在实验中 224 × 224 图像被划分为 14 × 14 个 patch，每个 patch 16 × 16。所有 patch 展平并线性映射得到 Transformer 的输入嵌入 ${h_i}_{i=1}^N$，用于后续编码。
+
+在 VQ-KD 训练中，视觉 tokenizer 由编码器和量化器组成：
+
+* 编码器将图像转换为 patch 表征 $h_i$；
+
+* 量化器在代码本 $V \in R^{K \times D}$ 中查找每个 $h_i$ 的最近邻进行量化，得到离散 token $z_i$，公式为：
+
+$$
+z_i = \arg\min_j ||\hat{h}_i - \hat{v}_j||_2, \quad j \in \{1,2,\dots,K\}
+$$
+
+其中 $\hat{\cdot}$ 表示 $L_2$ 归一化，等价于基于余弦相似度查找最近代码。量化后的 $L_2$ 归一化代码 ${\hat{v}_{z_i}}$ 输入解码器，解码器输出 ${o_i}$ 尝试重建教师模型（如 DINO 或 CLIP）的语义特征 $t_i$。训练目标最大化 decoder 输出与教师特征的余弦相似度，同时通过 stop-gradient 机制处理量化不可导问题，梯度从 decoder 输入传递到 encoder 输出。训练目标公式为：
+
+$$
+\max \sum_{x \in D} \sum_{i=1}^N \cos(o_i, t_i) - ||sg[\hat{h}_i] - \hat{v}_{z_i}||_2^2 - ||\hat{h}_i - sg[\hat{v}_{z_i}]||_2^2
+$$
+
+其中 $sg[\cdot]$ 表示停止梯度操作，$D$ 为训练图像数据集。
+
+向量量化训练中常见问题是代码本塌陷（codebook collapse），即只使用少量编码。为缓解此问题，VQ-KD 使用经验策略：
+
+* 查找最近邻时对代码本嵌入进行 $L_2$ 归一化，并将维度降至 32；
+
+* 在输入 decoder 前将低维嵌入映射回高维空间；
+
+* 代码本嵌入使用指数移动平均（EMA）更新，EMA 能更稳定地追踪模型训练动态。
+
+整体而言，BEIT V2 结合视觉 tokenizer、VQ-KD 和 Transformer 架构，通过 patch 级别的离散表示学习与教师特征对齐，实现对图像语义信息的高效编码与预训练。
+
 ## 代码解读
 
 ### 预训练阶段一: d-VAE 模型训练
@@ -301,3 +339,142 @@ def kmeans(samples, num_clusters, num_iters = 10, use_cosine_sim = False):
    * 在训练过程中，如果向量的范数变化剧烈，会导致距离计算不稳定，进而影响 codebook 的更新。
   
    * 归一化可以避免过大的梯度和数值爆炸，稳定 EMA 更新。
+
+```python
+class NormEMAVectorQuantizer(nn.Module):
+    def __init__(self, n_embed, embedding_dim, beta, decay=0.99, eps=1e-5, 
+                 statistic_code_usage=True, kmeans_init=False, codebook_init_path=''):
+        """
+        基于 EMA（Exponential Moving Average）的向量量化器（Vector Quantizer）
+        用于 VQ-VAE 或类似模型。
+        
+        参数：
+        - n_embed: 码本中向量的数量（token 数量）
+        - embedding_dim: 每个码本向量的维度
+        - beta: 重构损失中的量化损失系数
+        - decay: EMA 更新衰减系数
+        - eps: 防止除零的小常数
+        - statistic_code_usage: 是否统计每个码本向量的使用频率
+        - kmeans_init: 是否使用 K-means 初始化码本
+        - codebook_init_path: 初始化码本的路径
+        """
+        super().__init__()
+        
+        # 保存码本的维度和 token 数量
+        self.codebook_dim = embedding_dim
+        self.num_tokens = n_embed
+        self.beta = beta
+        self.decay = decay
+        
+        # 使用 EMA 的可学习嵌入表
+        # EmbeddingEMA 内部会实现 EMA 更新和量化逻辑
+        self.embedding = EmbeddingEMA(
+            self.num_tokens, 
+            self.codebook_dim, 
+            decay, 
+            eps, 
+            kmeans_init, 
+            codebook_init_path
+        )
+        
+        # 是否统计码本向量的使用频率
+        self.statistic_code_usage = statistic_code_usage
+        if statistic_code_usage:
+            # cluster_size 用于记录每个码本向量被使用的次数
+            # register_buffer 不会被认为是可训练参数，但会随模型一起保存/加载
+            self.register_buffer('cluster_size', torch.zeros(n_embed))
+        
+        # 分布式训练支持
+        # 如果当前环境支持分布式训练并已初始化，则使用 all_reduce 同步各 GPU 的码本使用统计
+        if distributed.is_available() and distributed.is_initialized():
+            print("ddp is enable, so use ddp_reduce to sync the statistic_code_usage for each gpu!")
+            self.all_reduce_fn = distributed.all_reduce
+        else:
+            # 单 GPU 或未初始化分布式训练时，直接使用 Identity（不做任何操作）
+            self.all_reduce_fn = nn.Identity()
+```
+
+```python
+def forward(self, z):
+    """
+    前向传播函数，实现向量量化（Vector Quantization）和 EMA 更新
+
+    参数:
+    - z: 输入特征图, shape (batch, channel, height, width)
+    
+    返回:
+    - z_q: 量化后的特征图，shape 同输入
+    - loss: 量化损失
+    - encoding_indices: 每个向量对应的码本索引
+    """
+    
+    # 将输入从 (B, C, H, W) 转换为 (B, H, W, C) 以便处理通道维
+    z = rearrange(z, 'b c h w -> b h w c')
+    
+    # L2 归一化
+    z = l2norm(z)
+    
+    # 展平特征图，每一行对应一个向量 (num_vectors, embedding_dim)
+    z_flattened = z.reshape(-1, self.codebook_dim)
+    
+    # 初始化码本（如果需要）
+    self.embedding.init_embed_(z_flattened)
+    
+    # 计算每个向量与码本中所有向量的欧氏距离平方
+    d = z_flattened.pow(2).sum(dim=1, keepdim=True) + \
+        self.embedding.weight.pow(2).sum(dim=1) - 2 * \
+        torch.einsum('bd,nd->bn', z_flattened, self.embedding.weight)  # 'n d -> d n'
+    
+    # 为每个向量找到最近的码本索引
+    encoding_indices = torch.argmin(d, dim=1)
+
+    # 将编码索引映射回码本向量并 reshape 成原来的特征图形状
+    z_q = self.embedding(encoding_indices).view(z.shape)
+    
+    # one-hot 编码
+    encodings = F.one_hot(encoding_indices, self.num_tokens).type(z.dtype)     
+    
+    # 非训练模式下统计码本使用情况
+    if not self.training:
+        with torch.no_grad():
+            cluster_size = encodings.sum(0)
+            self.all_reduce_fn(cluster_size)  # 分布式同步
+            ema_inplace(self.cluster_size, cluster_size, self.decay)
+    
+    # 训练模式下更新 EMA 码本
+    if self.training and self.embedding.update:
+        bins = encodings.sum(0)
+        self.all_reduce_fn(bins)
+
+        # 更新 cluster_size 的 EMA
+        ema_inplace(self.cluster_size, bins, self.decay)
+
+        # 避免除零
+        zero_mask = (bins == 0)
+        bins = bins.masked_fill(zero_mask, 1.)
+
+        # 计算每个码本向量的累加特征
+        embed_sum = z_flattened.t() @ encodings
+        self.all_reduce_fn(embed_sum)
+
+        # 归一化并 L2 正则化
+        embed_normalized = (embed_sum / bins.unsqueeze(0)).t()
+        embed_normalized = l2norm(embed_normalized)
+
+        # 对未使用的码本向量保持原值
+        embed_normalized = torch.where(zero_mask[..., None], self.embedding.weight,
+                                       embed_normalized)
+        # 更新 EMA 码本权重
+        norm_ema_inplace(self.embedding.weight, embed_normalized, self.decay)
+
+    # 量化损失
+    loss = self.beta * F.mse_loss(z_q.detach(), z) 
+    
+    # 保留梯度
+    z_q = z + (z_q - z).detach()
+
+    # reshape 回原始输入形状 (B, C, H, W)
+    z_q = rearrange(z_q, 'b h w c -> b c h w')
+    
+    return z_q, loss, encoding_indices
+```
