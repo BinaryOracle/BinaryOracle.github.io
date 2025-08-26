@@ -260,3 +260,57 @@ print(label_counts[2])        # 4
 print(label_counts.most_common(1))  # [(2, 4)]
 print(list(label_counts.elements())) # [0, 0, 0, 1, 1, 2, 2, 2, 2]
 ```
+
+## pytorch 内置 采样库
+
+`WeightedRandomSampler` 是 **PyTorch** 提供的一个采样器，用于在构建 `DataLoader` 时 **按权重采样样本**，常用于类别不平衡的数据集。
+
+```python
+torch.utils.data.WeightedRandomSampler(
+    weights,
+    num_samples,
+    replacement=True
+)
+```
+* **weights**
+
+  * 一维数组/列表，长度等于样本数。
+  
+  * 每个元素表示对应样本被采样的概率权重。
+  
+  * 权重越大，被抽到的概率越高。
+
+* **num\_samples**
+
+  * 采样的样本数（即每个 epoch 中从数据集中抽多少个样本）。
+  
+  * 通常设为 `len(dataset)` 或 `len(train_labels)`。
+
+* **replacement**
+
+  * 是否有放回采样：
+
+    * `True`：可以重复采样同一样本。
+  
+    * `False`：无放回采样（但这时 `num_samples` 不能超过数据集大小）。
+
+
+举例:
+
+```python
+train_label_counts = Counter(train_labels)
+# 计算每个样本的权重：类别样本越少，权重越高
+train_sample_weights = [1.0 / train_label_counts[label] for label in train_labels]
+
+# 构建加权随机采样器
+train_sampler = WeightedRandomSampler(
+    weights=train_sample_weights,
+    num_samples=len(train_labels),  # 每个epoch采样样本数=总样本数
+    replacement=True                # 允许重复采样
+)
+```
+
+* **思路**：类别数量少 → 权重大 → 更容易被采到。
+
+* **目的**：让每个类别在训练过程中被抽到的机会接近均衡，从而缓解类别不平衡问题。
+
