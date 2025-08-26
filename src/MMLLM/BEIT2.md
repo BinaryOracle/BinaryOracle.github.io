@@ -83,7 +83,7 @@ $$
 
 #### 代码实现
 
-#### 码本_EMA
+关于阶段一的预训练过程，我们先来看 `cookbook` 的代码实现，由于 `BEiT-V2` 采用 `EMA(指数平均移动)` 来对码本的状态参数进行缓慢更新，所以代码实现方面会维护一些额外的状态参数:
 
 ```python
 class EmbeddingEMA(nn.Module):
@@ -137,7 +137,10 @@ class EmbeddingEMA(nn.Module):
 
         # 是否启用更新
         self.update = True
+```
 
+
+```python
     @torch.jit.ignore
     def init_embed_(self, data):
         """
