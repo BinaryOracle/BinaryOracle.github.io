@@ -45,13 +45,86 @@ author:
 
 ## 代码解读
 
-### 预训练阶段一: VQ-VAE 模型训练
+### 预训练阶段一: d-VAE 模型训练
 
 ![](beit2/1.png)
 
 #### 码本_EMA
 
+```python
+class EmbeddingEMA(nn.Module):
+    def __init__(self, num_tokens, codebook_dim, decay=0.99, eps=1e-5, 
+                 kmeans_init=True, codebook_init_path=''):
+        """
+        向量量化的 codebook（码本）管理类，采用 EMA（指数滑动平均）进行更新。
 
+        参数:
+        - num_tokens: 码本的向量个数（即字典大小）
+        - codebook_dim: 每个向量的维度
+        - decay: EMA 的衰减系数
+        - eps: 避免数值错误的小常数
+        - kmeans_init: 是否使用 k-means 初始化
+        - codebook_init_path: 若提供，则从已有 checkpoint 加载初始化码本
+        """
+        super().__init__()
+        self.num_tokens = num_tokens
+        self.codebook_dim = codebook_dim
+        self.decay = decay
+        self.eps = eps 
+        
+        # ========== 初始化权重 ==========
+        if codebook_init_path == '':   # 如果没有提供预训练的 codebook
+            if not kmeans_init:
+                # 随机初始化，并做 L2 归一化，保证每个 embedding 向量长度为 1
+                weight = torch.randn(num_tokens, codebook_dim)
+                weight = l2norm(weight)
+            else:
+                # 若选择 kmeans_init，则先用全零矩阵占位，稍后再通过 k-means 初始化
+                weight = torch.zeros(num_tokens, codebook_dim)
+
+            # 标记是否完成初始化（True=已初始化，False=未初始化）
+            self.register_buffer('initted', torch.Tensor([not kmeans_init]))
+        else:
+            # 如果给定路径，则直接加载预训练的 codebook 权重
+            print(f"load init codebook weight from {codebook_init_path}")
+            codebook_ckpt_weight = torch.load(codebook_init_path, map_location='cpu')
+            weight = codebook_ckpt_weight.clone()
+            self.register_buffer('initted', torch.Tensor([True]))
+            
+        # ========== 需要维护的参数 ==========
+        # codebook 权重（不参与梯度更新，使用 EMA 更新）
+        self.weight = nn.Parameter(weight, requires_grad = False)
+
+        # 每个 cluster 的大小（计数），用来做 EMA 更新
+        self.cluster_size = nn.Parameter(torch.zeros(num_tokens), requires_grad = False)
+
+        # 每个 cluster embedding 的均值，用于 EMA 更新
+        self.embed_avg = nn.Parameter(weight.clone(), requires_grad = False)
+
+        # 是否启用更新
+        self.update = True
+
+    @torch.jit.ignore
+    def init_embed_(self, data):
+        """
+        用 k-means 对码本进行初始化。
+        - data: encoder 输出的样本数据 (N, D)
+        """
+        if self.initted:   # 若已初始化，则跳过
+            return
+        
+        print("Performing K-means init for codebook")
+
+        # 调用 kmeans 获取初始的 cluster 中心和 cluster 大小
+        embed, cluster_size = kmeans(data, self.num_tokens, 10, use_cosine_sim = True)
+
+        # 更新权重和 cluster_size
+        self.weight.data.copy_(embed)
+        self.cluster_size.data.copy_(cluster_size)
+
+        # 设置为已初始化状态
+        self.initted.data.copy_(torch.Tensor([True]))
+```
 
 #### 向量量化器
 
@@ -118,6 +191,42 @@ class NormEMAVectorQuantizer(nn.Module):
         self.initted.data.copy_(torch.Tensor([True]))
 ```
 
+k-means 的计算步骤可以总结为以下几个核心环节：
+
+1. **初始化簇中心**
+
+   * 从样本中随机选取 `num_clusters` 个向量作为初始中心，或者使用其他方法（如 k-means++）。
+
+2. **计算样本与中心的距离/相似度**
+
+   * 对每个样本计算它与所有簇中心的距离（欧氏距离）或相似度（余弦相似度）。
+
+3. **样本分配**
+
+   * 将每个样本分配到最近的簇（或相似度最高的簇），形成簇成员集合。
+
+4. **统计簇信息**
+
+   * 统计每个簇的样本数量（用于更新中心和处理空簇）。
+
+5. **更新簇中心**
+
+   * 对每个簇，将簇内样本向量求平均，得到新的中心。
+
+   * 若某簇为空，则保留原中心不变。
+   
+   * 如果使用余弦相似度，更新后的中心需要做 L2 归一化。
+
+6. **迭代**
+
+   * 重复步骤 2–5，直到达到预定迭代次数或收敛条件。
+
+7. **输出结果**
+
+   * 返回最终的簇中心和每个簇的样本数。
+
+这整个过程就是 k-means 聚类的标准迭代流程：**分配 → 更新 → 循环**。
+
 ```python
 def kmeans(samples, num_clusters, num_iters = 10, use_cosine_sim = False):
     # samples: 输入样本，形状 (N, D)，N 是样本数，D 是维度
@@ -176,3 +285,19 @@ def kmeans(samples, num_clusters, num_iters = 10, use_cosine_sim = False):
     # 返回最终的簇中心和每个簇的样本数
     return means, bins
 ```
+
+在 **量化前做 L2 归一化**，主要有几个原因：
+
+1. **避免数值尺度差异**
+
+   * 原始特征向量 $z$ 可能不同维度、不同样本之间的数值范围差异很大。
+  
+   * 如果直接计算欧氏距离，大的数值范围会主导距离计算，导致不公平。
+  
+   * L2 归一化后，每个向量都被缩放到单位长度（模长 = 1），使得比较时主要依赖 **方向差异** 而不是数值大小。
+
+2. **提高稳定性**
+
+   * 在训练过程中，如果向量的范数变化剧烈，会导致距离计算不稳定，进而影响 codebook 的更新。
+  
+   * 归一化可以避免过大的梯度和数值爆炸，稳定 EMA 更新。

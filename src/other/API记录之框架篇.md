@@ -88,3 +88,175 @@ def my_model(pretrained=False, **kwargs):
 
 前者是**用**模型，后者是**加**模型。
 
+## scikit-learn 库
+
+### train_test_split
+
+`train_test_split`（来自 `sklearn.model_selection`）用于把一个或多个并行数组按比例切分成训练集和测试集，常用于机器学习的数据准备。
+
+```py
+def train_test_split(
+    *arrays,
+    test_size=None,
+    train_size=None,
+    random_state=None,
+    shuffle=True,
+    stratify=None,
+)
+```
+
+* `*arrays`：一个或多个数组（如 `X, y`），长度必须相同。返回值是按输入顺序交错的切分结果：`X_train, X_test, y_train, y_test, ...`。
+
+* `test_size`：`float`（0\~1，表示比例）或 `int`（样本数）或 `None`。若都为 `None`，默认 `test_size=0.25`。
+
+* `train_size`：同 `test_size`，可用来显式指定训练集大小（优先级低于 `test_size`）。
+
+* `random_state`：整数或 `RandomState`，用于可重复的随机化（只在 `shuffle=True` 时生效）。
+
+* `shuffle`：是否先打乱样本（默认 `True`）。设为 `False` 时按原序切分。
+
+* `stratify`：用于分层采样的标签数组（与输入长度相同），保证切分后各类比例与原始数据一致；如果提供了 `stratify`，必须 `shuffle=True`。
+
+简单例子:
+
+```py
+from sklearn.model_selection import train_test_split
+import numpy as np
+
+X = np.arange(10).reshape(10,1)       # 10 个样本特征
+y = np.array([0,0,0,0,1,1,1,1,1,1])   # 不平衡标签
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42, stratify=y
+)
+
+print(X_train.shape, X_test.shape)  # (7,1) (3,1)
+print(np.bincount(y_train), np.bincount(y_test))
+# 输出会显示训练/测试集中 0/1 类的比例与原始近似一致
+```
+
+**注意点**:
+
+* 给多个数组（如 `X, y, z`）时，返回对应数量的切分结果。
+
+* `stratify` 用于类别任务，能避免切分导致某类在测试集中缺失。
+
+* 若需固定切分可用 `random_state`；想保留原序列则 `shuffle=False`。
+
+### compute_class_weight
+
+`compute_class_weight` 是 **scikit-learn** 提供的一个函数，用于根据样本分布计算每个类别的权重，常用于 **类别不平衡** 的分类任务。
+
+```python
+sklearn.utils.class_weight.compute_class_weight(
+    class_weight,
+    classes,
+    y
+)
+```
+
+* **class\_weight**
+
+  * `'balanced'`：自动计算权重，和类别频率成反比。
+  
+  * `dict`：手动指定某些类别的权重，如 `{0: 1.0, 1: 5.0}`。
+  
+  * `None`：不计算，所有类别权重为 1。
+
+* **classes**
+  
+  * 所有类别的 **唯一标签数组**（如 `[0, 1, 2]`）。
+
+* **y**
+  
+  * 训练数据的标签数组（如 `[0,0,1,2,2,2]`）。
+
+
+返回值:
+
+* **`weights`**：一维数组，长度与 `classes` 相同，表示每个类别的权重。
+
+计算公式（`balanced` 模式）：
+
+$$
+w_j = \frac{n_{samples}}{n_{classes} \times n_j}
+$$
+
+其中：
+
+* $n_{samples}$：样本总数
+
+* $n_{classes}$：类别数
+
+* $n_j$：第 j 类的样本数
+
+示例:
+
+```python
+from sklearn.utils.class_weight import compute_class_weight
+import numpy as np
+
+y = np.array([0, 0, 1, 2, 2, 2])  # 样本标签
+classes = np.unique(y)
+
+weights = compute_class_weight('balanced', classes=classes, y=y)
+print("类别权重:", dict(zip(classes, weights)))
+```
+
+输出：
+
+```
+类别权重: {0: 1.0, 1: 3.0, 2: 0.67}
+```
+
+说明：
+
+* 类别 `0` 有 2 个样本 → 权重较低
+
+* 类别 `1` 只有 1 个样本 → 权重最高
+
+* 类别 `2` 有 3 个样本 → 权重最低
+
+
+## python 内置 collections 库
+
+### Counter
+
+`Counter` 是 Python 内置库 **collections** 提供的一个计数器类，用于统计可迭代对象中各元素出现的次数。
+
+```python
+from collections import Counter
+Counter(iterable)      # 输入一个可迭代对象
+Counter(mapping)       # 输入一个字典
+Counter(a=2, b=3, ...) # 输入关键字参数
+```
+
+* 返回的是一个字典的子类，键为元素，值为出现次数。
+
+* 查询一个未出现的元素时，计数为 0。
+
+* 支持常见的字典操作，还扩展了计数相关方法。
+
+常用方法:
+
+* `most_common(n)`：返回出现次数最多的前 `n` 个元素及其频数。
+
+* `elements()`：按出现次数依次返回元素（迭代器）。
+
+* `update(iterable)`：更新计数。
+
+* `subtract(iterable)`：减少计数。
+
+例子:
+
+```python
+from collections import Counter
+
+all_labels = [0, 1, 0, 2, 1, 0, 2, 2, 2]
+label_counts = Counter(all_labels)
+
+print(label_counts)           # Counter({2: 4, 0: 3, 1: 2})
+print(label_counts[2])        # 4
+print(label_counts.most_common(1))  # [(2, 4)]
+print(list(label_counts.elements())) # [0, 0, 0, 1, 1, 2, 2, 2, 2]
+```
