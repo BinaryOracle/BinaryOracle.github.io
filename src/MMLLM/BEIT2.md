@@ -682,3 +682,50 @@ class VQKD(nn.Module):
 
         return rec_loss
 ```
+
+### 预训练阶段二: 掩码图像建模学习目标用于BEiT预训练
+
+![](beit2/2.png)
+
+BEiT V2 预训练采用了 **掩码图像建模（MIM）** 的策略，类似于 BEIT 原论文（Bao et al., 2022）。给定一张输入图像 $x$，大约 40% 的图像 patch 会被随机选择并遮挡（mask），记被遮挡的位置为 $M$。在这些位置，使用一个共享的可学习 embedding $e[M]$ 替换原始的 patch embedding $x_p^i$：
+
+$$
+x_M^i = \delta(i \in M) e[M] + (1 - \delta(i \in M)) x_p^i
+$$
+
+其中 $\delta(\cdot)$ 是指示函数。随后在输入前加入一个可学习的 [CLS] token，形成 $[e_{\text{CLS}}, {x_M^i}_{i=1}^{N}]$ 并输入视觉 Transformer。最终编码向量为 ${h_i}_{i=0}^{N}$，其中 $h_0$ 对应 [CLS] token。MIM 头由一个全连接层构成，用于预测被遮挡位置的视觉 token：
+
+$$
+p(z_i \mid h_i) = \text{softmax}_{z_i}(W_c h_i + b_c)
+$$
+
+视觉 token 来自之前训练好的 tokenizer，为 MIM 自监督提供监督信号。MIM 的训练损失为：
+
+$$
+L_{\text{MIM}} = - \sum_{x \in D} \sum_{i \in M} \log p(z_i \mid x_M^i)
+$$
+
+其中 $z_i$ 为原图像对应的视觉 token，$D$ 为预训练图像集合。需要注意的是，本工作中视觉 token 的数量与图像 patch 数量相同。
+
+---
+
+为了提升全局图像表征，BEiT V2 对 [CLS] token 进行了专门预训练，旨在缓解 patch 级预训练与图像级表示聚合之间的差异（如图3所示）。具体做法是为 [CLS] token 构建信息流 bottleneck，让其尽可能收集全局信息。对于 L 层 Transformer，第 $l$ 层的 patch 向量记为 ${h_i^l}_{i=1}^{N}$，最后一层的 [CLS] token 为 $h_{\text{CLS}}^L$。将其与中间层 $l$ 的 patch 向量拼接形成 $S$：
+
+$$
+S = [h_{\text{CLS}}^L, h_1^l, \dots, h_N^l]
+$$
+
+然后输入浅层（如两层） Transformer decoder，再次进行遮挡预测：
+
+$$
+p(z \mid S) = \text{softmax}_z(W_c S + b_c)
+$$
+
+MIM 头参数在两处共享，MIM 损失仍只在被遮挡位置计算。最终训练损失为两部分之和：第 L 层原始损失 + 浅层 decoder 的 MIM 损失。
+
+---
+
+这种设计的直观效果是模型会倾向于把全局信息推送到 $h_{\text{CLS}}^L$，因为模型会尽可能利用第 $l+1$ 层到第 L 层的参数，减少额外 MIM 损失。信息流 bottleneck 鼓励 [CLS] token 学到更可靠的全局表征，同时增强的表征有助于下游任务。需要注意的是，浅层 decoder 仅用于预训练 [CLS] token，预训练完成后会被丢弃。
+
+> patch 聚合策略个人理解: 通过 CLS token 聚合全局信息并参与浅层 patch token 的遮挡预测，实现全局信息对局部特征学习的反哺，从而提升 MIM 任务的预训练效果。
+
