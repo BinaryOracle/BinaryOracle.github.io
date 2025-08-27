@@ -384,10 +384,10 @@ def forward(self, z):
         # 更新 EMA 码本权重
         norm_ema_inplace(self.embedding.weight, embed_normalized, self.decay)
 
-    # 量化损失
+    # 量化损失 --- 只对encoder进行更新，cookbook不采用梯度回传更新
     loss = self.beta * F.mse_loss(z_q.detach(), z) 
     
-    # 保留梯度
+    # 保留梯度 --- 用于后续重建损失，梯度可以沿着直接通路回传回encoder进行更新
     z_q = z + (z_q - z).detach()
 
     # reshape 回原始输入形状 (B, C, H, W)
