@@ -606,3 +606,79 @@ class VQKD(nn.Module):
 
         return target
 ```
+
+`VQ-KD` 模型提供了 `encode` 方法用于对输入图像进行编码，得到量化后的特征表示:
+
+```python
+    def encode(self, x):
+        """
+        编码函数：将图像编码为量化的token
+        
+        Args:
+            x: 输入图像
+            
+        Returns:
+            quantize: 量化后的特征
+            embed_ind: 嵌入索引
+            loss: 量化损失
+        """
+        # 使用编码器提取特征
+        encoder_features = self.encoder(x, return_patch_tokens=True)
+
+        # 通过任务层调整特征维度
+        with torch.cuda.amp.autocast(enabled=False):
+            to_quantizer_features = self.encode_task_layer(encoder_features.type_as(self.encode_task_layer[-1].weight))
+
+        # 重塑特征为空间维度
+        N = to_quantizer_features.shape[1]
+        h, w = int(math.sqrt(N)), int(math.sqrt(N))
+        to_quantizer_features = rearrange(to_quantizer_features, 'b (h w) c -> b c h w', h=h, w=w)
+        
+        # 使用量化器进行向量量化
+        quantize, loss, embed_ind = self.quantize(to_quantizer_features)
+        return quantize, embed_ind, loss
+```
+
+对应的还有 `decode` 方法，用于将量化后的特征解码为原始图像:
+
+```python
+    def decode(self, quantize, **kwargs):
+        """
+        解码函数：将量化的token解码为重建特征
+        
+        Args:
+            quantize: 量化的特征
+            
+        Returns:
+            rec: 重建的特征
+        """
+        # 使用解码器重建特征
+        decoder_features = self.decoder(quantize, return_patch_tokens=True)
+        # 通过任务层调整输出维度
+        rec = self.decode_task_layer(decoder_features)
+        return rec
+```
+最后补充一下重建损失计算的代码实现，如下所示:
+
+```python
+    def calculate_rec_loss(self, rec, target):  
+        """
+        计算重建损失
+        
+        Args:
+            rec: 重建的特征
+            target: 目标特征
+            
+        Returns:
+            rec_loss: 重建损失值
+        """
+        if self.rec_loss_type == 'cosine':
+            # 余弦相似度损失：将特征归一化后计算余弦距离
+            target = target / target.norm(dim=-1, keepdim=True)
+            rec = rec / rec.norm(dim=-1, keepdim=True)
+            rec_loss = (1 - (target * rec).sum(-1)).mean()
+        else:
+            raise NotImplementedError
+
+        return rec_loss
+```
