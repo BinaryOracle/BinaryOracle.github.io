@@ -414,6 +414,42 @@ def ema_inplace(moving_avg, new, decay):
 
 简而言之，这一步就是 **“统计簇内所有样本 → 计算簇中心”** 的操作。
 
+最后讲解一下上面代码最后的两处梯度卸载操作:
+
+```python
+    # 量化损失 --- 只对encoder进行更新，cookbook不采用梯度回传更新
+    loss = self.beta * F.mse_loss(z_q.detach(), z) 
+```
+
+MSE 公式展开如下：
+
+$$
+\text{loss} = \frac{1}{N} \sum_{i=1}^{N} \| z_i - z_{q,i}^{\text{detach}} \|^2
+$$
+
+* $z_i$：encoder 输出
+
+* $z_{q,i}^{\text{detach}}$：量化向量（detach 后不可导）
+
+反向梯度：
+
+$$
+\frac{\partial \text{loss}}{\partial z_i} = \frac{2}{N} (z_i - z_{q,i}^{\text{detach}})
+$$
+
+* $z_q^{\text{detach}}$ 被视作常量 → 不产生梯度
+
+* encoder 输出 $z$ 可以接收梯度
+
+* codebook 不通过梯度更新，EMA 更新独立
+
+```python
+    # 保留梯度 --- 用于后续重建损失，梯度可以沿着直接通路回传回encoder进行更新
+    z_q = z + (z_q - z).detach()
+```
+
+z_q 被更新后，后面参与了重建损失的计算，梯度回传的时候，(z_q - z).detach() 这部分被当作了常量，计算图认为对学习任务的贡献全部来源于 z ，但实际上前向传播阶段的贡献来源于z_q，这相当于使了一个障眼法。
+
 ---
 
 最后我们来看一下 `VQKD` 模型的完整结构，首先从它的初始化方法入手：
