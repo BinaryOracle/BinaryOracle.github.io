@@ -413,3 +413,102 @@ def ema_inplace(moving_avg, new, decay):
 4. 均值向量就作为 **新的 codebook 向量**（簇中心）用于 EMA 更新
 
 简而言之，这一步就是 **“统计簇内所有样本 → 计算簇中心”** 的操作。
+
+---
+
+最后我们来看一下 `VQKD` 模型的完整结构，首先从它的初始化方法入手：
+
+```python
+class VQKD(nn.Module):
+    """
+    VQKD (Vector-Quantized Knowledge Distillation) 模型
+    
+    这是一个基于向量量化的知识蒸馏模型，用于学习图像的语义表示。
+    包含编码器、解码器、量化器和教师模型等组件。
+    """
+    def __init__(self,
+                 encoder_config,      # 编码器配置参数
+                 decoder_config,      # 解码器配置参数
+                 n_embed=8192,        # 代码本大小（词汇表大小）
+                 embed_dim=32,        # 嵌入维度
+                 decay=0.99,          # EMA衰减率
+                 process_type='default',  # 图像预处理类型
+                 quantize_kmeans_init=True,  # 是否使用k-means初始化量化器
+                 teacher_model_type='clip',   # 教师模型类型（clip或dino）
+                 decoder_out_dim=512,         # 解码器输出维度
+                 rec_loss_type='cosine',      # 重建损失类型
+                 **kwargs
+                 ):
+        super().__init__()
+        print(kwargs)
+        
+        # 确保解码器的输入通道数与嵌入维度匹配
+        if decoder_config['in_chans'] != embed_dim:
+            print(f"Rewrite the in_chans in decoder from {decoder_config['in_chans']} to {embed_dim}")
+            decoder_config['in_chans'] = embed_dim
+        
+        # 创建编码器和解码器
+        print('Final encoder config', encoder_config)
+        self.encoder = VisionTransformer(**encoder_config)  # 使用Vision Transformer作为编码器
+
+        print('Final decoder config', decoder_config)
+        self.decoder = VisionTransformer(**decoder_config)  # 使用Vision Transformer作为解码器
+                
+        # 创建向量量化器
+        self.quantize = NormEMAVectorQuantizer(
+            n_embed=n_embed, embedding_dim=embed_dim, beta=1.0, kmeans_init=quantize_kmeans_init, decay=decay,
+        )
+        
+        # 记录patch大小和token形状
+        self.patch_size = encoder_config['patch_size']
+        self.token_shape = (encoder_config['img_size'] // self.patch_size, encoder_config['img_size'] // self.patch_size)
+
+        ## 教师模型设置
+        self.teacher_model_type = teacher_model_type
+        self.decoder_out_dim = decoder_out_dim
+        
+        if self.teacher_model_type == 'clip':
+            # 使用CLIP作为教师模型
+            self.scaling_layer = ScalingLayerForClip()  # CLIP专用的缩放层
+            self.teacher_model, _ = clip.load("ViT-B/16", device='cpu', jit=False)  # 加载CLIP ViT-B/16模型
+            self.decoder_out_dim = 512  # CLIP输出维度为512
+
+        elif self.teacher_model_type == 'dino':
+            # 使用DINO作为教师模型
+            self.scaling_layer = ScalingLayerForIM()  # DINO专用的缩放层
+            self.teacher_model = get_dino_vit_base()  # 加载DINO ViT-Base模型
+            self.decoder_out_dim = 768  # DINO输出维度为768
+
+        else:
+            self.teacher_model = None
+
+        if self.teacher_model is not None:
+            # 冻结教师模型参数，不参与训练
+            for param in self.teacher_model.parameters():
+                param.requires_grad = False
+            self.teacher_model.eval()  # 设置为评估模式
+            self.teacher_input_size = kwargs.get('teacher_input_size', 224)
+
+        # 任务特定层：用于调整特征维度
+        self.encode_task_layer = nn.Sequential(
+            nn.Linear(encoder_config['embed_dim'], encoder_config['embed_dim']),  # 线性变换
+            nn.Tanh(),  # 激活函数
+            nn.Linear(encoder_config['embed_dim'], embed_dim)  # 映射到量化器维度
+        )
+        self.decode_task_layer = nn.Sequential(
+            nn.Linear(decoder_config['embed_dim'], decoder_config['embed_dim']),  # 线性变换
+            nn.Tanh(),  # 激活函数
+            nn.Linear(decoder_config['embed_dim'], self.decoder_out_dim),  # 映射到教师模型输出维度
+        )
+        
+        self.rec_loss_type = rec_loss_type
+
+        print(f"process type for VQKD: {process_type}")
+        self.process_type = process_type  # 支持 'default', 'dall-e', 'imagenet_norm'
+        self.logit_laplace_eps = 0.1
+        self.kwargs = kwargs
+        
+        # 初始化权重
+        self.encode_task_layer.apply(self._init_weights)
+        self.decode_task_layer.apply(self._init_weights)
+```
