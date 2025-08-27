@@ -139,6 +139,15 @@ class EmbeddingEMA(nn.Module):
         self.update = True
 ```
 
+`cookbook` 初始化过程大体含有两个阶段: 码本权重初始化; 状态参数初始化; `BEiT-V2` 针对码本权重的初始化还做了特别的优化，我们可以打开 `kmeans_init` 开关，让码本延迟到首次向量量化阶段，采用 `k-means` 算法对 `encoder` 输出的特征向量做聚类迭代，得到 `num_tokens` 个簇中心来作为码本的初始化向量。
+
+这样做的好处是:
+
+* 避免了随机初始化导致的码本塌陷问题;
+
+* 利用了 `encoder` 输出的特征分布信息，使得码本初始化更加合理。
+
+代码实现如下:
 
 ```python
     @torch.jit.ignore
@@ -160,71 +169,6 @@ class EmbeddingEMA(nn.Module):
         self.cluster_size.data.copy_(cluster_size)
 
         # 设置为已初始化状态
-        self.initted.data.copy_(torch.Tensor([True]))
-```
-
-#### 向量量化器
-
-向量量化器负责将连续的视觉特征映射到离散的视觉 `token`，该过程借助内部维护的 `cookbook` 完成，本节我们先来详细解析一下它的实现逻辑:
-
-```python
-class NormEMAVectorQuantizer(nn.Module):
-    def __init__(self, n_embed, embedding_dim, beta, decay=0.99, eps=1e-5, 
-                statistic_code_usage=True, kmeans_init=False, codebook_init_path=''):
-        super().__init__()
-        
-        # codebook 向量的维度（即每个 embedding 的维数）
-        self.codebook_dim = embedding_dim
-        # codebook 的大小（有多少个离散 token）
-        self.num_tokens = n_embed
-        # commitment loss 的权重系数
-        self.beta = beta
-        # EMA 更新的衰减系数
-        self.decay = decay
-        
-        # codebook，使用 EMA 更新（非梯度更新）
-        # 这里的 EmbeddingEMA 类负责存储和更新 codebook 向量
-        # 参数：
-        # - num_tokens: codebook 的大小
-        # - codebook_dim: 每个向量的维度
-        # - decay, eps: EMA 更新超参
-        # - kmeans_init: 是否用 k-means 初始化 codebook
-        # - codebook_init_path: 是否从文件加载已有的 codebook
-        self.embedding = EmbeddingEMA(
-            self.num_tokens, 
-            self.codebook_dim, 
-            decay, 
-            eps, 
-            kmeans_init, 
-            codebook_init_path
-        )
-        
-        # 是否统计每个 code 的使用频率（防止 dead code）
-        self.statistic_code_usage = statistic_code_usage
-        if statistic_code_usage:
-            # cluster_size 用来存储每个 code 的使用计数，注册为 buffer，随模型保存
-            self.register_buffer('cluster_size', torch.zeros(n_embed))
-```
-
-```python
-    @torch.jit.ignore
-    def init_embed_(self, data):
-        """
-        使用 k-means 对 codebook 进行初始化。
-        只会执行一次，之后 self.initted 会标记为 True。
-        """
-        if self.initted:
-            return
-        print("Performing Kmeans init for codebook")
-
-        # 在输入数据 data 上运行 k-means
-        embed, cluster_size = kmeans(data, self.num_tokens, 10, use_cosine_sim = True)
-
-        # 把 k-means 得到的聚类中心赋值给 codebook
-        self.weight.data.copy_(embed)
-        # 把每个簇的样本数存下来
-        self.cluster_size.data.copy_(cluster_size)
-        # 标记为已初始化
         self.initted.data.copy_(torch.Tensor([True]))
 ```
 
@@ -262,7 +206,7 @@ k-means 的计算步骤可以总结为以下几个核心环节：
 
    * 返回最终的簇中心和每个簇的样本数。
 
-这整个过程就是 k-means 聚类的标准迭代流程：**分配 → 更新 → 循环**。
+这整个过程就是 k-means 聚类的标准迭代流程：**分配 → 更新 → 循环** , 具体代码实现如下:
 
 ```python
 def kmeans(samples, num_clusters, num_iters = 10, use_cosine_sim = False):
@@ -323,50 +267,33 @@ def kmeans(samples, num_clusters, num_iters = 10, use_cosine_sim = False):
     return means, bins
 ```
 
-在 **量化前做 L2 归一化**，主要有几个原因：
+---
 
-1. **避免数值尺度差异**
-
-   * 原始特征向量 $z$ 可能不同维度、不同样本之间的数值范围差异很大。
-  
-   * 如果直接计算欧氏距离，大的数值范围会主导距离计算，导致不公平。
-  
-   * L2 归一化后，每个向量都被缩放到单位长度（模长 = 1），使得比较时主要依赖 **方向差异** 而不是数值大小。
-
-2. **提高稳定性**
-
-   * 在训练过程中，如果向量的范数变化剧烈，会导致距离计算不稳定，进而影响 codebook 的更新。
-  
-   * 归一化可以避免过大的梯度和数值爆炸，稳定 EMA 更新。
+向量量化器负责将连续的视觉特征映射到离散的视觉 `token`，该过程借助内部维护的 `cookbook` 完成，本节我们来详细解析一下它的实现逻辑:
 
 ```python
 class NormEMAVectorQuantizer(nn.Module):
     def __init__(self, n_embed, embedding_dim, beta, decay=0.99, eps=1e-5, 
-                 statistic_code_usage=True, kmeans_init=False, codebook_init_path=''):
-        """
-        基于 EMA（Exponential Moving Average）的向量量化器（Vector Quantizer）
-        用于 VQ-VAE 或类似模型。
-        
-        参数：
-        - n_embed: 码本中向量的数量（token 数量）
-        - embedding_dim: 每个码本向量的维度
-        - beta: 重构损失中的量化损失系数
-        - decay: EMA 更新衰减系数
-        - eps: 防止除零的小常数
-        - statistic_code_usage: 是否统计每个码本向量的使用频率
-        - kmeans_init: 是否使用 K-means 初始化码本
-        - codebook_init_path: 初始化码本的路径
-        """
+                statistic_code_usage=True, kmeans_init=False, codebook_init_path=''):
         super().__init__()
         
-        # 保存码本的维度和 token 数量
+        # codebook 向量的维度（即每个 embedding 的维数）
         self.codebook_dim = embedding_dim
+        # codebook 的大小（有多少个离散 token）
         self.num_tokens = n_embed
+        # commitment loss 的权重系数
         self.beta = beta
+        # EMA 更新的衰减系数
         self.decay = decay
         
-        # 使用 EMA 的可学习嵌入表
-        # EmbeddingEMA 内部会实现 EMA 更新和量化逻辑
+        # codebook，使用 EMA 更新（非梯度更新）
+        # 这里的 EmbeddingEMA 类负责存储和更新 codebook 向量
+        # 参数：
+        # - num_tokens: codebook 的大小
+        # - codebook_dim: 每个向量的维度
+        # - decay, eps: EMA 更新超参
+        # - kmeans_init: 是否用 k-means 初始化 codebook
+        # - codebook_init_path: 是否从文件加载已有的 codebook
         self.embedding = EmbeddingEMA(
             self.num_tokens, 
             self.codebook_dim, 
@@ -376,22 +303,13 @@ class NormEMAVectorQuantizer(nn.Module):
             codebook_init_path
         )
         
-        # 是否统计码本向量的使用频率
+        # 是否统计每个 code 的使用频率（防止 dead code）
         self.statistic_code_usage = statistic_code_usage
         if statistic_code_usage:
-            # cluster_size 用于记录每个码本向量被使用的次数
-            # register_buffer 不会被认为是可训练参数，但会随模型一起保存/加载
+            # cluster_size 用来存储每个 code 的使用计数，注册为 buffer，随模型保存
             self.register_buffer('cluster_size', torch.zeros(n_embed))
-        
-        # 分布式训练支持
-        # 如果当前环境支持分布式训练并已初始化，则使用 all_reduce 同步各 GPU 的码本使用统计
-        if distributed.is_available() and distributed.is_initialized():
-            print("ddp is enable, so use ddp_reduce to sync the statistic_code_usage for each gpu!")
-            self.all_reduce_fn = distributed.all_reduce
-        else:
-            # 单 GPU 或未初始化分布式训练时，直接使用 Identity（不做任何操作）
-            self.all_reduce_fn = nn.Identity()
 ```
+向量量化器的前向传播过程负责将 `encoder` 编码得到的特征图 `z` 映射到离散的视觉 `token` 上，具体过程如下:
 
 ```python
 def forward(self, z):
@@ -477,3 +395,4 @@ def forward(self, z):
     
     return z_q, loss, encoding_indices
 ```
+
