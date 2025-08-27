@@ -395,4 +395,21 @@ def forward(self, z):
     
     return z_q, loss, encoding_indices
 ```
+前向传播的过程中，向量量化器还完成了对码本相关状态参数的更新，更新算法为: EMA(指数平均移动更新)。
 
+```python
+def ema_inplace(moving_avg, new, decay):
+    moving_avg.data.mul_(decay).add_(new, alpha = (1 - decay))
+```
+
+关于码本向量的更新流程就是 **计算每个 codebook 的新的簇中心**：
+
+1. 用 `encodings` 把属于同一个 codebook 的样本挑出来
+
+2. 把这些样本向量累加 → 得到 `embed_sum`
+
+3. 除以该 codebook 的样本数量 → 得到均值
+
+4. 均值向量就作为 **新的 codebook 向量**（簇中心）用于 EMA 更新
+
+简而言之，这一步就是 **“统计簇内所有样本 → 计算簇中心”** 的操作。
