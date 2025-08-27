@@ -476,18 +476,9 @@ class VQKD(nn.Module):
                  **kwargs
                  ):
         super().__init__()
-        print(kwargs)
-        
-        # 确保解码器的输入通道数与嵌入维度匹配
-        if decoder_config['in_chans'] != embed_dim:
-            print(f"Rewrite the in_chans in decoder from {decoder_config['in_chans']} to {embed_dim}")
-            decoder_config['in_chans'] = embed_dim
-        
-        # 创建编码器和解码器
-        print('Final encoder config', encoder_config)
-        self.encoder = VisionTransformer(**encoder_config)  # 使用Vision Transformer作为编码器
 
-        print('Final decoder config', decoder_config)
+        # 创建编码器和解码器
+        self.encoder = VisionTransformer(**encoder_config)  # 使用Vision Transformer作为编码器
         self.decoder = VisionTransformer(**decoder_config)  # 使用Vision Transformer作为解码器
                 
         # 创建向量量化器
@@ -547,4 +538,71 @@ class VQKD(nn.Module):
         # 初始化权重
         self.encode_task_layer.apply(self._init_weights)
         self.decode_task_layer.apply(self._init_weights)
+```
+
+`VQKD` 模型的前向传播流程负责具体落地知识蒸馏算法的实现，也就是让 `d-VAE` 模型学会从教师模型中学会编码图像高级语义信息的能力:
+
+```python
+    def forward(self, x, **kwargs):
+        """
+        前向传播函数
+        
+        Args:
+            x: 输入图像，形状为 [B, 3, H, W]，值域为 [0, 1]
+            
+        Returns:
+            loss: 总损失
+            log: 损失日志
+        """
+        x = self.pre_process(x)  # 预处理图像到 [-1, 1] 范围
+
+        # 从教师模型获取目标特征
+        target = self.get_regress_target(x, **kwargs)
+
+        # 编码和解码
+        quantize, embed_ind, emb_loss = self.encode(x)  # 编码得到量化结果
+        xrec = self.decode(quantize)  # 解码重建特征
+
+        # 计算重建损失
+        rec_loss = self.calculate_rec_loss(xrec, target)
+        # 总损失 = 量化损失 + 重建损失
+        loss = emb_loss + rec_loss
+
+        # 记录损失日志
+        log = {}
+        split = "train" if self.training else "val"
+        log[f'{split}/quant_loss'] = emb_loss.detach().mean()  # 量化损失
+        log[f'{split}/rec_loss'] = rec_loss.detach().mean()    # 重建损失
+        log[f'{split}/total_loss'] = loss.detach().mean()      # 总损失
+
+        return loss, log
+```
+
+从教师模型获取先验知识的过程，就是将图像送入预训练好的图像编码器，如: `CLIP` 或 `DINO` 中，得到编码后的图像特征输出:
+
+```python
+    @torch.no_grad()
+    def get_regress_target(self, x, **kwargs):
+        """
+        获取回归目标（从教师模型）
+        
+        Args:
+            x: 输入图像
+            
+        Returns:
+            target: 教师模型的特征表示
+        """
+        # 使用缩放层预处理图像
+        norm_imgs = self.scaling_layer(x)
+        
+        if self.teacher_model_type == 'clip':
+            # CLIP教师模型：编码图像并投影到特征空间
+            target = self.teacher_model.encode_image(norm_imgs, return_all_tokens=True) @ self.teacher_model.visual.proj
+        elif self.teacher_model_type == 'dino':
+            # DINO教师模型：前向传播获取特征
+            target = self.teacher_model.forward(norm_imgs, return_patch_tokens=True)
+        else:
+            raise NotImplementedError
+
+        return target
 ```
