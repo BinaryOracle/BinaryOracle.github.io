@@ -250,6 +250,8 @@ $$
 
 在图像输入方面，我们遵循 ALIGN 的设定，使用 $288 \times 288$ 的图像分辨率和 $18 \times 18$ 的 patch size，得到 256 个图像 token。我们的最大模型 CoCa（简称 “CoCa”）采用 ViT-giant 结构，图像编码器有 10 亿参数，连同文本解码器在内总参数量为 21 亿。此外，我们还探索了两个更小的变体：“CoCa-Base”和“CoCa-Large”（见表1）。
 
+![](coca/3.png)
+
 ---
 
 **注意力池化（Attentional Poolers）**：
