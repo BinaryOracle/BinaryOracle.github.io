@@ -16,8 +16,6 @@ author:
 
 <!-- more -->
 
-# LASO 模型代码解读与复现
-
 > 论文: [SpatialLM: Training Large Language Models for Structured Indoor Modeling](https://arxiv.org/abs/2506.07491)
 > 代码: [https://manycore-research.github.io/SpatialLM/](https://manycore-research.github.io/SpatialLM/)
 
