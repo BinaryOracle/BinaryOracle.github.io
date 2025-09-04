@@ -24,7 +24,7 @@ author:
 
 ## 代码实现
 
-Point Transformer 中提出的向量自注意力计算代码逻辑实现如下:
+Point Transformer 中提出的向量自注意力计算逻辑如:
 
 ```python
 class PointTransformerLayer(nn.Module):
@@ -111,6 +111,12 @@ class PointTransformerLayer(nn.Module):
         return x
 ```
 
+下面给出的是通过 `KNN` 算法寻找 `查询点集合(new_xyz)` 中每个点在 `所有点集合(xyz)` 中距离最近的 `nsample` 个点，然后返回距离最近的 `nsample` 个点的索引和距离。
+
+由于不同点云的点密度不同，所以同批次中可能存在前 `n` 个点云的点数为 `1024` ，后 `m` 个点云的点数为 `2048` ，所以用 `offset 和 new_offset` 列表记录 `[n,m]` 区间范围。
+
+算法的实现过程: 每一个查询点和所有点执行距离计算，然后返回距离最近的 `nsample` 个点的索引和距离； 完整代码实现如下:
+
 ```python
 class KNNQuery(Function):
     @staticmethod
@@ -150,13 +156,14 @@ class KNNQuery(Function):
                 batch_new_xyz = new_xyz[new_start_idx:new_end_idx]
 
                 # 计算查询点与所有点之间的欧几里得距离平方
-                # 使用广播机制计算坐标差 ，(1,n,3) - (m,1,3) = (m,n,3) - (m,n,3)
-                diff = batch_xyz.unsqueeze(0) - batch_new_xyz.unsqueeze(1)  # (m_batch, n_batch, 3)
-                distances = torch.sum(diff ** 2, dim=-1)  # (m_batch, n_batch) - 平方距离矩阵
+                # 使用广播机制计算坐标差: (1,n,3) - (m,1,3) = (m,n,3) - (m,n,3) = (m_batch, n_batch, 3)
+                diff = batch_xyz.unsqueeze(0) - batch_new_xyz.unsqueeze(1)  
+                # (m_batch, n_batch) - 平方距离矩阵
+                distances = torch.sum(diff ** 2, dim=-1)
 
                 # 获取k个最近邻的索引和距离
                 actual_nsample = min(nsample, distances.shape[1])  # 实际可用的最近邻数量
-                # torch.topk返回最小的k个值及其索引
+                # torch.topk返回最小的k个值及其索引: (m_batch,actual_nsample)
                 knn_dist, knn_idx = torch.topk(distances, actual_nsample, dim=1, largest=False)
 
                 # 如果实际邻居数量小于要求的nsample，进行填充
@@ -181,8 +188,10 @@ class KNNQuery(Function):
 
 # 定义KNN查询的apply函数
 knnquery = KNNQuery.apply
+```
 
 
+```python
 def queryandgroup(nsample, xyz, new_xyz, feat, idx, offset, new_offset, use_xyz=True):
     """
     查询并分组函数：为每个查询点找到最近邻并分组其特征
