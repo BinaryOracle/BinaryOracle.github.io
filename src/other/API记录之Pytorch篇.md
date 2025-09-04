@@ -569,3 +569,47 @@ tensor.scatter_add_(dim, index, src)
   * 如果 `dim=0`，`index[i,j]` 表示 `src[i,j]` 要加到 `tensor[index[i,j], j]`。
 
   * 如果 `dim=1`，`index[i,j]` 表示 `src[i,j]` 要加到 `tensor[i, index[i,j]]`。
+
+### torch.topk
+
+`torch.topk()` 是 PyTorch 中一个非常实用的函数，用于获取张量中最大或最小的 k 个值及其索引。
+
+```python
+torch.topk(input, k, dim=None, largest=True, sorted=True, *, out=None)
+```
+
+1. `input` (必需)
+
+- 输入张量
+
+- 示例：`distances` 形状为 `(m_batch, n_batch)` 的距离矩阵
+
+2. `k` (必需)
+
+- 要返回的最大/最小值的数量
+
+- 示例：`actual_nsample` 实际需要的最近邻数量
+
+3. `dim` (可选)
+
+- 沿着哪个维度进行操作
+
+- 示例：`dim=1` 表示在每行中找 topk
+
+- 默认值：最后一个维度 (`dim=-1`)
+
+4. `largest` (可选)
+
+- `True`: 返回最大的 k 个值
+
+- `False`: 返回最小的 k 个值
+
+- 示例：`largest=False` 用于找最小距离（最近邻）
+
+5. `sorted` (可选)
+
+- `True`: 返回的值按顺序排列
+
+- `False`: 返回的值不保证顺序
+
+- 默认值：`True`
