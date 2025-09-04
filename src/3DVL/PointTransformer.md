@@ -112,5 +112,119 @@ class PointTransformerLayer(nn.Module):
 ```
 
 ```python
+class KNNQuery(Function):
+    @staticmethod
+    def forward(ctx, nsample, xyz, new_xyz, offset, new_offset):
+        """
+        KNN查询的前向传播函数
+        input:
+            nsample: 需要查询的最近邻数量
+            xyz: 所有点的坐标 (n, 3)
+            new_xyz: 查询点的坐标 (m, 3)，如果为None则使用xyz
+            offset: 每个batch的点的结束索引 (b)
+            new_offset: 每个batch的查询点的结束索引 (b)
+        output:
+            idx: 每个查询点的最近邻点索引 (m, nsample)
+            dist2: 每个查询点到最近邻点的平方距离 (m, nsample)
+        """
+        if new_xyz is None:
+            new_xyz = xyz  # 如果没有指定查询点，则对所有点进行自查询
+        assert xyz.is_contiguous() and new_xyz.is_contiguous()
+        m = new_xyz.shape[0]  # 查询点的数量
 
+        # 初始化输出张量：索引矩阵和距离矩阵
+        idx = torch.zeros((m, nsample), dtype=torch.long)
+        dist2 = torch.zeros((m, nsample))
+
+        # 按batch处理数据
+        start_idx, new_start_idx = 0, 0  # 当前batch的起始索引
+        for i in range(len(offset)):
+            # 计算当前batch的结束索引
+            end_idx = offset[i] if i < len(offset) else xyz.shape[0]
+            new_end_idx = new_offset[i] if i < len(new_offset) else m
+
+            # 确保当前batch有数据需要处理
+            if end_idx > start_idx and new_end_idx > new_start_idx:
+                # 提取当前batch的点坐标和查询点坐标
+                batch_xyz = xyz[start_idx:end_idx]
+                batch_new_xyz = new_xyz[new_start_idx:new_end_idx]
+
+                # 计算查询点与所有点之间的欧几里得距离平方
+                # 使用广播机制计算坐标差 ，(1,n,3) - (m,1,3) = (m,n,3) - (m,n,3)
+                diff = batch_xyz.unsqueeze(0) - batch_new_xyz.unsqueeze(1)  # (m_batch, n_batch, 3)
+                distances = torch.sum(diff ** 2, dim=-1)  # (m_batch, n_batch) - 平方距离矩阵
+
+                # 获取k个最近邻的索引和距离
+                actual_nsample = min(nsample, distances.shape[1])  # 实际可用的最近邻数量
+                # torch.topk返回最小的k个值及其索引
+                knn_dist, knn_idx = torch.topk(distances, actual_nsample, dim=1, largest=False)
+
+                # 如果实际邻居数量小于要求的nsample，进行填充
+                if actual_nsample < nsample:
+                    # 使用0填充索引和距离矩阵
+                    padding = torch.zeros((knn_idx.shape[0], nsample - actual_nsample), dtype=knn_idx.dtype)
+                    knn_idx = torch.cat([knn_idx, padding], dim=1)
+                    knn_dist = torch.cat(
+                        [knn_dist, torch.zeros((knn_dist.shape[0], nsample - actual_nsample), dtype=knn_dist.dtype)],
+                        dim=1)
+
+                # 将当前batch的结果存入总输出中，注意加上全局偏移量
+                idx[new_start_idx:new_end_idx] = knn_idx + start_idx
+                dist2[new_start_idx:new_end_idx] = knn_dist
+
+            # 更新下一个batch的起始索引
+            start_idx, new_start_idx = end_idx, new_end_idx
+
+        # 返回最近邻索引和实际距离（加上小常数避免数值不稳定）
+        return idx, torch.sqrt(dist2 + 1e-8)
+
+
+# 定义KNN查询的apply函数
+knnquery = KNNQuery.apply
+
+
+def queryandgroup(nsample, xyz, new_xyz, feat, idx, offset, new_offset, use_xyz=True):
+    """
+    查询并分组函数：为每个查询点找到最近邻并分组其特征
+    input:
+        nsample: 最近邻数量
+        xyz: 所有点的坐标 (n, 3)
+        new_xyz: 查询点的坐标 (m, 3)
+        feat: 所有点的特征 (n, c)
+        idx: 预计算的最近邻索引，如果为None则重新计算
+        offset: 每个batch的点的结束索引 (b)
+        new_offset: 每个batch的查询点的结束索引 (b)
+        use_xyz: 是否在输出中包含相对坐标信息
+    output:
+        new_feat: 分组后的特征，如果use_xyz=True则为(m, nsample, 3+c)，否则为(m, nsample, c)
+        grouped_idx: 分组后的索引 (m, nsample)
+    """
+    assert xyz.is_contiguous() and new_xyz.is_contiguous() and feat.is_contiguous()
+
+    # 如果没有指定查询点，则使用所有点作为查询点
+    if new_xyz is None:
+        new_xyz = xyz
+
+    # 如果没有提供预计算的索引，则调用KNN查询函数计算
+    if idx is None:
+        idx, _ = knnquery(nsample, xyz, new_xyz, offset, new_offset)  # (m, nsample)
+
+    n, m, c = xyz.shape[0], new_xyz.shape[0], feat.shape[1]
+
+    # 根据索引分组坐标：获取每个查询点的邻居坐标
+    grouped_xyz = xyz[idx.view(-1).long(), :].view(m, nsample, 3)  # (m, nsample, 3)
+
+    # 计算相对坐标：邻居坐标减去查询点坐标（局部坐标系）： （200，8，3） -  （200，1，3）= （ 200,8,3 ）
+    grouped_xyz -= new_xyz.unsqueeze(1)  # (m, nsample, 3)
+
+    # 根据索引分组特征：获取每个查询点的邻居特征
+    grouped_feat = feat[idx.view(-1).long(), :].view(m, nsample, c)  # (m, nsample, c)
+
+    # 根据use_xyz标志决定输出格式
+    if use_xyz:
+        # 拼接相对坐标和特征：输出形状为(m, nsample, 3+c)
+        return torch.cat((grouped_xyz, grouped_feat), -1)
+    else:
+        # 只返回特征：输出形状为(m, nsample, c)
+        return grouped_feat
 ```

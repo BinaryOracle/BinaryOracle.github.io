@@ -613,3 +613,153 @@ torch.topk(input, k, dim=None, largest=True, sorted=True, *, out=None)
 - `False`: 返回的值不保证顺序
 
 - 默认值：`True`
+
+### 连续性
+
+> “连续内存”: 一个多维张量在内存中实际上是以一维数组的形式存储的。
+> 
+> *   **内存连续**：意味着按照张量的**最右维度（最内层维度）** 变化最快的方式（即行优先，Row Major）顺序，将其所有元素无间隔地、顺序地存储在一块内存中。
+> 
+> *   **内存不连续**：意味着张量的元素在内存中的存储顺序与其逻辑上的维度顺序不匹配，或者内存中存在间隔（Stride）。
+
+`stride` 是一个元组，表示在每个维度上移动一个元素时，**需要在内存中跳过多少个元素**。它是理解连续性的关键。 对于一个形状为 `(C, H, W)` 的连续张量，其 `stride` 通常是 `(H*W, W, 1)`。
+
+*   在 `C` 维度上移动 1 位，需要在内存中跳过 `H*W` 个元素。
+
+*   在 `H` 维度上移动 1 位，需要在内存中跳过 `W` 个元素。
+
+*   在 `W` 维度上移动 1 位，只需要移动到下一个元素（`1` 个）。
+
+**判断连续性的条件**：当张量的 `stride` 与其 `size` 满足特定关系时（即 `stride[i] == stride[i+1] * size[i+1]`），该张量才是连续的。
+
+---
+
+#### tensor.is_contiguous()
+
+*   **作用**：判断当前张量的内存布局是否是连续的。
+
+*   **返回值**：一个布尔值（`True` 或 `False`）。
+
+*   **特点**：这是一个**轻量级**的检查操作，只检查元数据（`stride`, `size`），不复制任何数据。
+
+**示例**：
+
+```python
+import torch
+
+# 创建一个连续张量
+x = torch.randn(2, 3, 4)
+print(x.is_contiguous())  # 输出: True
+print(x.stride())         # 输出: (12, 4, 1) -> (3*4, 4, 1)
+
+# 创建一个不连续张量的常见操作：转置（Transpose）
+y = x.transpose(0, 2) # 将维度0和维度2交换
+print(y.shape)        # 输出: torch.Size([4, 3, 2])
+print(y.stride())     # 输出: (1, 4, 12) -> 与连续时的步长规则不符
+print(y.is_contiguous()) # 输出: False
+```
+
+像 `transpose()`, `permute()`, `narrow()`, `expand()`, `t()` 等操作通常会产生**不连续**的张量，因为它们只改变了视图（View），而没有实际重新排列内存中的数据。
+
+---
+
+#### tensor.contiguous()
+
+*   **作用**：返回一个**内存连续**的、数据内容相同的张量。
+
+*   **返回值**：一个新的张量。
+
+*   **特点**：
+
+    *   如果原张量**已经是连续的**，则 `contiguous()` **不会进行任何复制操作**，直接返回原张量本身（`self`）。
+
+    *   如果原张量**不是连续的**，则 `contiguous()` **会分配一块新的连续内存**，并将原张量的数据**按照其逻辑顺序复制**到这块新内存中。
+
+**示例**：
+
+```python
+import torch
+
+x = torch.randn(2, 3)
+print(f"x is contiguous: {x.is_contiguous()}") # True
+
+# 创建一个不连续的视图
+y = x.t() # 转置操作
+print(f"y is contiguous: {y.is_contiguous()}") # False
+
+# 对不连续的 y 调用 contiguous()
+z = y.contiguous()
+print(f"z is contiguous: {z.is_contiguous()}") # True
+
+# 验证内存地址和数据
+print(f"y data ptr: {y.storage().data_ptr()}") # 与 x 相同
+print(f"z data ptr: {z.storage().data_ptr()}") # 与 x/y 不同，是新分配的
+
+# 验证数据内容是否一致
+print(torch.all(y == z)) # 输出: True，数据值相同
+```
+
+---
+
+#### 为什么需要 `contiguous()` ？
+
+许多 PyTorch 操作（尤其是底层由 CUDA/C++ 实现的操作）**要求输入张量必须是内存连续的**，否则会报错或得到错误的结果。最常见的场景包括：
+
+1.  **视图操作（View）**：`tensor.view()` **要求**张量是连续的。
+   
+    ```python
+    y = x.t()
+    # z = y.view(-1) # 这里会报错：RuntimeError: view size is not compatible with input tensor's size and stride...
+    z = y.contiguous().view(-1) # 正确做法：先连续化，再改变视图
+   
+    ```
+2.  **`.data_ptr()` 访问**：如果你想获得底层数据存储区的指针，需要确保它是连续的。
+
+3.  **与外部库交互**：例如将 PyTorch 张量转换为 NumPy 数组（`tensor.numpy()`）或传递给其他 C++ 扩展时，通常需要连续的内存布局。
+
+4.  **某些性能关键的操作**：连续的内存访问模式对 CPU/GPU 缓存更友好，有时能提升计算效率。
+
+#### 归一化层对连续性的要求
+
+> 🔴 **必须传入连续张量**
+
+**BatchNorm系列** (`nn.BatchNorm1d/2d/3d`)
+
+- **原因**：底层CUDA实现严格依赖连续内存布局进行跨批次统计计算
+
+- **风险**：直接传入不连续张量极高概率导致运行时错误或计算结果错误
+
+> 🟡 **强烈建议传入连续张量**  
+
+**LayerNorm** (`nn.LayerNorm`)
+
+- **原因**：虽然某些实现能处理不连续输入，但为保障跨平台一致性和最佳性能
+
+- **建议**：总是使用 `.contiguous()` 确保稳定性和计算效率
+
+> 🟡 **强烈建议传入连续张量**
+
+**InstanceNorm系列** (`nn.InstanceNorm1d/2d/3d`)  
+
+- **原因**：通道级别的统计计算同样受益于连续内存访问模式
+
+- **建议**：预处理中确保张量连续性以避免潜在问题
+
+> 🟡 **强烈建议传入连续张量**
+
+**GroupNorm** (`nn.GroupNorm`)
+
+- **原因**：分组统计计算需要高效的内存访问模式
+
+- **建议**：保持连续性以获得最佳性能和正确性
+
+**只有BatchNorm是"必须"的，其他都是"强烈建议"。但统一的最佳实践是：在所有归一化操作前都调用 `.contiguous()`，用微小的开销换取代码的健壮性和可维护性。**
+
+#### 总结
+
+| 方法 | 作用 | 数据复制行为 |
+| :--- | :--- | :--- |
+| `tensor.is_contiguous()` | **检查**张量内存是否连续 | 绝不复制数据 |
+| `tensor.contiguous()` | **确保**返回一个连续的张量 | **条件性复制**（仅在原张量不连续时复制） |
+
+**最佳实践**：当你对一个张量进行了 `transpose`, `permute` 等可能改变内存布局的操作后，如果后续需要用到 `view` 或者要将其传入某些特定函数，**安全起见，先调用 `.contiguous()`**。虽然有时不调用也能工作，但显式地调用可以避免难以调试的运行时错误。
