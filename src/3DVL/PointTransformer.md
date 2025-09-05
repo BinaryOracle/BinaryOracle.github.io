@@ -632,3 +632,176 @@ class FurthestSampling(Function):
         
         return idx
 ```
+
+### 上采样层
+
+**TransitionUp层的主要作用是在点云处理中恢复分辨率并融合多尺度特征**，类似于CNN中的上采样层（如转置卷积），但专门为点云数据设计。
+
+1. **恢复点云分辨率**
+
+```python
+# 将低分辨率特征上采样到高分辨率
+# 输入: 500个点 → 输出: 1000个点（分辨率恢复）
+```
+
+2. **多尺度特征融合**
+
+```python
+# 融合编码器（深层抽象特征）和解码器（浅层细节特征）
+# 结合高层语义信息和底层几何细节
+```
+
+3. **特征增强**
+
+```python
+# 通过全局上下文信息增强局部特征
+# 每个点都能感知整个点云的全局信息
+```
+
+4. **构建解码器路径**
+
+```python
+# 在U-Net类架构中逐步恢复空间分辨率
+# 同时保持丰富的特征表示
+```
+
+**两种工作模式**：
+
+- 模式1：**全局特征增强**（无跳跃连接）
+
+```
+当前层特征 → 计算全局平均特征 → 与每个点特征拼接 → 增强表示
+```
+
+- 模式2：**跳跃连接融合**（有跳跃连接）
+
+```
+当前层特征 + 上采样的编码器特征 → 融合 → 输出
+```
+
+通常用在解码器中，与编码器的TransitionDown对应：
+
+```
+编码器: 高分辨率 → TransitionDown → 中分辨率 → TransitionDown → 低分辨率
+
+解码器: 低分辨率 → TransitionUp → 中分辨率 → TransitionUp → 高分辨率
+```
+
+相当于CNN中的：
+
+- **转置卷积/上采样**（恢复分辨率）
+
+- **跳跃连接**（融合多尺度特征）  
+
+- **注意力机制**（引入全局上下文）
+
+的组合操作，但专门为**点云数据**设计; 完整代码实现如下所示:
+
+```python
+class TransitionUp(nn.Module):
+    """
+    点云上采样过渡层
+    功能：恢复点云分辨率并融合不同层级的特征，实现特征上采样
+    类似于CNN中的上采样/转置卷积层，但专为点云设计
+    """
+    def __init__(self, in_planes, out_planes=None):
+        """
+        初始化上采样层
+        Args:
+            in_planes: 输入特征维度
+            out_planes: 输出特征维度（如果为None，则输出维度与输入相同）
+        """
+        super().__init__()
+        
+        if out_planes is None:
+            # 模式1：输出维度与输入相同（通常用于解码器中间层）
+            self.linear1 = nn.Sequential(
+                nn.Linear(2 * in_planes, in_planes),  # 将拼接后的特征映射回原维度
+                nn.BatchNorm1d(in_planes),            # 批归一化
+                nn.ReLU(inplace=True)                 # ReLU激活
+            )
+            self.linear2 = nn.Sequential(
+                nn.Linear(in_planes, in_planes),      # 全局特征变换
+                nn.ReLU(inplace=True)                 # ReLU激活
+            )
+        else:
+            # 模式2：改变输出维度（通常用于连接编码器和解码器）
+            self.linear1 = nn.Sequential(
+                nn.Linear(out_planes, out_planes),    # 恒等映射变换
+                nn.BatchNorm1d(out_planes),           # 批归一化
+                nn.ReLU(inplace=True)                 # ReLU激活
+            )
+            self.linear2 = nn.Sequential(
+                nn.Linear(in_planes, out_planes),     # 维度变换
+                nn.BatchNorm1d(out_planes),           # 批归一化
+                nn.ReLU(inplace=True)                 # ReLU激活
+            )
+        
+    def forward(self, pxo1, pxo2=None):
+        """
+        前向传播：两种模式
+        Mode 1 (pxo2 is None): 仅使用全局特征增强当前层特征
+        Mode 2 (pxo2 provided): 跳跃连接 - 融合深层特征和浅层特征
+        
+        Args:
+            pxo1: 元组 (p, x, o) - 当前层的点坐标、特征、批次索引
+            pxo2: 元组 (p, x, o) - 跳跃连接来自编码器的点坐标、特征、批次索引（可选）
+            
+        Returns:
+            x: 上采样后的特征，形状与pxo1中的特征相同或变换后的维度
+        """
+        if pxo2 is None:
+            # ==================== 模式1：全局特征增强 ====================
+            # 仅使用当前层特征进行自增强（无跳跃连接）
+            _, x, o = pxo1  # 解包：忽略坐标，只取特征和批次索引
+            
+            x_tmp = []  # 存储处理后的每个批次特征
+            
+            # 按批次处理
+            for i in range(o.shape[0]):
+                # 计算当前批次的起始、结束索引和点数
+                if i == 0:
+                    s_i, e_i, cnt = 0, o[0].item(), o[0].item()  # 第一个批次
+                else:
+                    s_i, e_i = o[i-1].item(), o[i].item()        # 后续批次
+                    cnt = e_i - s_i                              # 当前批次点数
+                
+                # 提取当前批次的特征
+                x_b = x[s_i:e_i, :]  # (cnt, in_planes)
+                
+                # 计算全局平均特征并变换
+                global_feat = x_b.sum(0, keepdim=True) / cnt  # (1, in_planes) - 批次平均特征
+                transformed_global = self.linear2(global_feat)  # (1, in_planes) - 变换后的全局特征
+                
+                # 将全局特征复制到每个点，并与原始特征拼接
+                x_b = torch.cat((x_b, transformed_global.repeat(cnt, 1)), dim=1)  # (cnt, 2*in_planes)
+                
+                x_tmp.append(x_b)
+            
+            # 合并所有批次
+            x = torch.cat(x_tmp, 0)  # (n, 2*in_planes)
+            
+            # 最终变换：降维 + 激活
+            x = self.linear1(x)  # (n, in_planes)
+            
+        else:
+            # ==================== 模式2：跳跃连接特征融合 ====================
+            # 融合编码器（深层）和解码器（浅层）的特征
+            p1, x1, o1 = pxo1  # 当前层（解码器）：通常分辨率更高
+            p2, x2, o2 = pxo2  # 跳跃连接层（编码器）：通常特征更抽象
+            
+            # 处理当前层特征
+            x1_transformed = self.linear1(x1)  # (n1, out_planes)
+            
+            # 处理跳跃连接特征并进行上采样（插值）
+            x2_transformed = self.linear2(x2)  # (n2, out_planes)
+            
+            # 将深层特征上采样到浅层分辨率：通过点云插值
+            # 将p2位置的特征插值到p1位置
+            x2_upsampled = pointops.interpolation(p2, p1, x2_transformed, o2, o1)
+            
+            # 特征融合：当前层特征 + 上采样的编码器特征
+            x = x1_transformed + x2_upsampled  # 逐元素相加
+            
+        return x
+```
