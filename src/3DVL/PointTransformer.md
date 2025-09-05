@@ -111,11 +111,76 @@ class PointTransformerLayer(nn.Module):
         return x
 ```
 
-下面给出的是通过 `KNN` 算法寻找 `查询点集合(new_xyz)` 中每个点在 `所有点集合(xyz)` 中距离最近的 `nsample` 个点，然后返回距离最近的 `nsample` 个点的索引和距离。
+`queryandgroup` 方法实现了点云的邻域查询和特征分组功能。具体流程如下：
 
-由于不同点云的点密度不同，所以同批次中可能存在前 `n` 个点云的点数为 `1024` ，后 `m` 个点云的点数为 `2048` ，所以用 `offset 和 new_offset` 列表记录 `[n,m]` 区间范围。
+1. **邻域查询**：对于查询点集合中的每个点，利用 `KNN` 算法在所有点集合中寻找最近的 `nsample` 个邻居点，并返回这些邻居点的索引；
 
-算法的实现过程: 每一个查询点和所有点执行距离计算，然后返回距离最近的 `nsample` 个点的索引和距离； 完整代码实现如下:
+2. **相对坐标计算**：将每个查询点的邻居点坐标减去查询点自身坐标，得到以查询点为原点的局部相对坐标系；
+
+3. **特征分组**：根据邻居点索引，提取对应的特征向量，形成每个查询点的邻域特征集合。
+
+该方法的核心作用是将无序的点云数据转换为有序的局部邻域结构，为后续的注意力计算提供空间上下文信息。完整代码实现如下所示:
+
+```python
+def queryandgroup(nsample, xyz, new_xyz, feat, idx, offset, new_offset, use_xyz=True):
+    """
+    查询并分组函数：为每个查询点找到最近邻并分组其特征
+    input:
+        nsample: 最近邻数量
+        xyz: 所有点的坐标 (n, 3)
+        new_xyz: 查询点的坐标 (m, 3)
+        feat: 所有点的特征 (n, c)
+        idx: 预计算的最近邻索引，如果为None则重新计算
+        offset: 每个batch的点的结束索引 (b)
+        new_offset: 每个batch的查询点的结束索引 (b)
+        use_xyz: 是否在输出中包含相对坐标信息
+    output:
+        new_feat: 分组后的特征，如果use_xyz=True则为(m, nsample, 3+c)，否则为(m, nsample, c)
+        grouped_idx: 分组后的索引 (m, nsample)
+    """
+    assert xyz.is_contiguous() and new_xyz.is_contiguous() and feat.is_contiguous()
+
+    # 如果没有指定查询点，则使用所有点作为查询点
+    if new_xyz is None:
+        new_xyz = xyz
+
+    # 如果没有提供预计算的索引，则调用KNN查询函数计算
+    if idx is None:
+        idx, _ = knnquery(nsample, xyz, new_xyz, offset, new_offset)  # (m, nsample)
+
+    n, m, c = xyz.shape[0], new_xyz.shape[0], feat.shape[1]
+
+    # 根据索引分组坐标：获取每个查询点的邻居坐标
+    grouped_xyz = xyz[idx.view(-1).long(), :].view(m, nsample, 3)  # (m, nsample, 3)
+
+    # 计算相对坐标：邻居坐标减去查询点坐标（局部坐标系）： （200，8，3） -  （200，1，3）= （ 200,8,3 ）
+    grouped_xyz -= new_xyz.unsqueeze(1)  # (m, nsample, 3)
+
+    # 根据索引分组特征：获取每个查询点的邻居特征
+    grouped_feat = feat[idx.view(-1).long(), :].view(m, nsample, c)  # (m, nsample, c)
+
+    # 根据use_xyz标志决定输出格式
+    if use_xyz:
+        # 拼接相对坐标和特征：输出形状为(m, nsample, 3+c)
+        return torch.cat((grouped_xyz, grouped_feat), -1)
+    else:
+        # 只返回特征：输出形状为(m, nsample, c)
+        return grouped_feat
+```
+
+`KNNQuery` 类实现了K近邻查询算法，其主要功能是为每个查询点寻找最近的邻居点。具体实现包含以下几个关键步骤：
+
+**1. 问题背景**：在批处理点云数据时，不同样本的点云可能包含不同数量的点（如第一个点云1024个点，第二个点云2048个点），因此需要使用 `offset` 和 `new_offset` 参数来标记每个batch中点云的边界范围。
+
+**2. 算法流程**：
+
+- 对于每个查询点，计算其与当前batch内所有候选点的欧几里得距离
+
+- 使用 `torch.topk` 函数选出距离最小的 `nsample` 个点
+
+- 返回最近邻点的索引和对应的距离值
+
+**3. 实现特点**：采用批处理方式提高计算效率，同时处理点云数量不一致的情况。完整代码实现如下:
 
 ```python
 class KNNQuery(Function):
@@ -188,52 +253,4 @@ class KNNQuery(Function):
 
 # 定义KNN查询的apply函数
 knnquery = KNNQuery.apply
-```
-
-
-```python
-def queryandgroup(nsample, xyz, new_xyz, feat, idx, offset, new_offset, use_xyz=True):
-    """
-    查询并分组函数：为每个查询点找到最近邻并分组其特征
-    input:
-        nsample: 最近邻数量
-        xyz: 所有点的坐标 (n, 3)
-        new_xyz: 查询点的坐标 (m, 3)
-        feat: 所有点的特征 (n, c)
-        idx: 预计算的最近邻索引，如果为None则重新计算
-        offset: 每个batch的点的结束索引 (b)
-        new_offset: 每个batch的查询点的结束索引 (b)
-        use_xyz: 是否在输出中包含相对坐标信息
-    output:
-        new_feat: 分组后的特征，如果use_xyz=True则为(m, nsample, 3+c)，否则为(m, nsample, c)
-        grouped_idx: 分组后的索引 (m, nsample)
-    """
-    assert xyz.is_contiguous() and new_xyz.is_contiguous() and feat.is_contiguous()
-
-    # 如果没有指定查询点，则使用所有点作为查询点
-    if new_xyz is None:
-        new_xyz = xyz
-
-    # 如果没有提供预计算的索引，则调用KNN查询函数计算
-    if idx is None:
-        idx, _ = knnquery(nsample, xyz, new_xyz, offset, new_offset)  # (m, nsample)
-
-    n, m, c = xyz.shape[0], new_xyz.shape[0], feat.shape[1]
-
-    # 根据索引分组坐标：获取每个查询点的邻居坐标
-    grouped_xyz = xyz[idx.view(-1).long(), :].view(m, nsample, 3)  # (m, nsample, 3)
-
-    # 计算相对坐标：邻居坐标减去查询点坐标（局部坐标系）： （200，8，3） -  （200，1，3）= （ 200,8,3 ）
-    grouped_xyz -= new_xyz.unsqueeze(1)  # (m, nsample, 3)
-
-    # 根据索引分组特征：获取每个查询点的邻居特征
-    grouped_feat = feat[idx.view(-1).long(), :].view(m, nsample, c)  # (m, nsample, c)
-
-    # 根据use_xyz标志决定输出格式
-    if use_xyz:
-        # 拼接相对坐标和特征：输出形状为(m, nsample, 3+c)
-        return torch.cat((grouped_xyz, grouped_feat), -1)
-    else:
-        # 只返回特征：输出形状为(m, nsample, c)
-        return grouped_feat
 ```
