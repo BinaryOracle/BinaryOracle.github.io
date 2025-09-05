@@ -113,3 +113,95 @@ cudnn.deterministic = True
 
 * `cudnn.deterministic = True`：强制使用确定性的卷积算法，保证每次运行结果一致。
 
+
+## 偏置与归一化层的关系
+
+**BatchNorm 会重新中心化数据**
+
+```python
+# BatchNorm 的数学公式：
+y = (x - mean) / sqrt(var + eps) * gamma + beta
+
+# 其中：
+# - gamma: 缩放参数（可学习）
+# - beta: 偏置参数（可学习）
+# - mean, var: 批次的均值和方差
+```
+
+**Linear 层也有偏置**
+
+```python
+# Linear 层的计算：
+z = x @ W.T + b  # b是偏置项
+```
+
+**为什么此时 Linear 层的偏置是冗余的** ？
+
+```
+输入 → Linear → BatchNorm 的计算链：
+
+output = BN(Linear(x))
+        = BN(x @ W.T + b)
+        = [(x @ W.T + b - mean) / std] * gamma + beta
+        = [x @ W.T / std + (b - mean)/std] * gamma + beta
+        = (x @ W.T) * (gamma/std) + [gamma*(b-mean)/std + beta]
+```
+
+**可以看到:**
+
+- `(x @ W.T) * (gamma/std)`：有效的权重变换
+
+- `[gamma*(b-mean)/std + beta]`：**常数偏置项**
+
+| 组件 | 作用 | 是否冗余 |
+|------|------|----------|
+| **Linear.bias** | 添加常数偏移 | ✅ 冗余 |
+| **BatchNorm.beta** | 添加常数偏移 | ✅ 唯一需要的 |
+| **BatchNorm.gamma** | 缩放特征 | ❌ 必要 |
+| **BatchNorm** 的均值归一化 | 中心化数据 | ❌ 必要 |
+
+**实际代码对比:**
+
+1. 错误做法（冗余）：
+
+```python
+# 浪费参数和计算
+self.linear = nn.Linear(in_dim, out_dim, bias=True)  # 有偏置
+self.bn = nn.BatchNorm1d(out_dim)                    # 也有偏置beta
+```
+
+2. 正确做法（优化后）：
+
+```python
+# 参数和计算更高效
+self.linear = nn.Linear(in_dim, out_dim, bias=False)  # 无偏置
+self.bn = nn.BatchNorm1d(out_dim)                     # 用BN的beta作为偏置
+```
+
+3. 如果**不使用 BatchNorm**，那么应该保留偏置：
+
+```python
+# 只有Linear层，没有BN
+self.linear = nn.Linear(in_dim, out_dim, bias=True)  # 需要偏置
+
+# 或者使用LayerNorm等其他归一化
+self.linear = nn.Linear(in_dim, out_dim, bias=False)
+self.norm = nn.LayerNorm(out_dim)  # LayerNorm也有偏置参数
+```
+
+**最佳实践总结**:
+
+| 场景 | 建议 | 原因 |
+|------|------|------|
+| **Linear + BatchNorm** | `bias=False` | 避免冗余，BN的beta足够 |
+| **只有Linear** | `bias=True` | 需要偏置来增加模型表达能力 |
+| **Linear + LayerNorm** | `bias=False` | LayerNorm也有可学习的偏置 |
+| **Linear + InstanceNorm** | `bias=False` | InstanceNorm有可学习的参数 |
+
+深度学习中的**标准实践**：
+
+1. **CNN中**：`Conv2d + BatchNorm` 时，`conv.bias=False`
+
+2. **Transformer中**：`Linear + LayerNorm` 时，`linear.bias=False`  
+
+3. **点云网络中**：`Linear + BatchNorm` 时，`linear.bias=False`

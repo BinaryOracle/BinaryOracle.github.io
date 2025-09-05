@@ -325,3 +325,90 @@ class KNNQuery(Function):
 # 定义KNN查询的apply函数
 knnquery = KNNQuery.apply
 ```
+
+### Point Transformer 残差块
+
+```python
+class PointTransformerBlock(nn.Module):
+    """
+    Point Transformer 残差块
+    实现预激活（Pre-Activation）的残差连接结构
+    """
+    expansion = 1  # 维度扩展系数，1表示输出维度与输入维度相同
+
+    def __init__(self, in_planes, planes, share_planes=8, nsample=16):
+        """
+        初始化函数
+        Args:
+            in_planes: 输入特征维度
+            planes: 中间特征维度（也是输出维度，因为expansion=1）
+            share_planes: 通道分组数，用于减少计算量
+            nsample: 每个点的邻居数量，用于kNN搜索
+        """
+        super(PointTransformerBlock, self).__init__()
+        
+        # 第一层：线性变换 + 批归一化（升维或保持维度）
+        self.linear1 = nn.Linear(in_planes, planes, bias=False)  # 无偏置，因为后面有BN
+        self.bn1 = nn.BatchNorm1d(planes)  # 批归一化，加速训练
+        
+        # 核心：Point Transformer 自注意力层
+        self.transformer2 = PointTransformerLayer(planes, planes, share_planes, nsample)
+        self.bn2 = nn.BatchNorm1d(planes)  # Transformer后的批归一化
+        
+        # 第三层：线性变换 + 批归一化（调整到最终输出维度）
+        self.linear3 = nn.Linear(planes, planes * self.expansion, bias=False)
+        self.bn3 = nn.BatchNorm1d(planes * self.expansion)  # 最终批归一化
+        
+        # 激活函数（原地操作节省内存）
+        self.relu = nn.ReLU(inplace=True)
+        
+        # 注意：这里应该有残差连接的shortcut处理
+        # 如果 in_planes != planes * expansion，需要投影层
+        if in_planes != planes * self.expansion:
+            self.shortcut = nn.Sequential(
+                nn.Linear(in_planes, planes * self.expansion, bias=False),
+                nn.BatchNorm1d(planes * self.expansion)
+            )
+        else:
+            self.shortcut = nn.Identity()  # 恒等映射
+
+    def forward(self, pxo):
+        """
+        前向传播
+        Args:
+            pxo: 元组 (p, x, o)
+                p: 点坐标，形状 (n, 3)
+                x: 点特征，形状 (n, in_planes)  
+                o: 批次索引，形状 (b)
+        Returns:
+            元组 (p, x, o): 变换后的点坐标、特征和批次索引
+        """
+        p, x, o = pxo  # 解包：点坐标, 点特征, batch索引
+        
+        # 保存原始输入用于残差连接（需要处理维度匹配）
+        identity = x
+        
+        # 第一层：线性变换 → BN → ReLU
+        x = self.linear1(x)      # (n, in_planes) → (n, planes)
+        x = self.bn1(x)          # 批归一化
+        x = self.relu(x)         # ReLU激活
+        
+        # 第二层：Point Transformer 自注意力 → BN → ReLU
+        x = self.transformer2([p, x, o])  # 应用自注意力，形状 (n, planes)
+        x = self.bn2(x)          # 批归一化
+        x = self.relu(x)         # ReLU激活
+        
+        # 第三层：线性变换 → BN
+        x = self.linear3(x)      # (n, planes) → (n, planes * expansion)
+        x = self.bn3(x)          # 最终批归一化
+        
+        # 残差连接：处理维度匹配问题
+        identity = self.shortcut(identity)  # 如果需要，投影到相同维度
+        
+        # 残差连接 + 激活
+        x += identity            # 添加残差连接
+        x = self.relu(x)         # 最终ReLU激活
+        
+        # 返回相同格式的数据
+        return [p, x, o]
+```
