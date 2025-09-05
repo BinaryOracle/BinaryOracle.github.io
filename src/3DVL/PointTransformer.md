@@ -169,6 +169,13 @@ result = grouped_features * attention_weights
 # [[[[1.0*0.5, 2.0*1.0],   # 组0: [0.5, 2.0]
 #    [3.0*0.5, 4.0*1.0]]]] # 组1: [1.5, 4.0]
 ```
+这实际上是一种分组通道注意力（Grouped Channel Attention）：
+
+1. 不是在序列维度上做注意力（token-token）
+
+2. 而是在通道维度上做注意力（channel-channel）
+
+3. 通过分组实现参数共享
 
 ---
 
