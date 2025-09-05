@@ -320,10 +320,6 @@ class KNNQuery(Function):
 
         # 返回最近邻索引和实际距离（加上小常数避免数值不稳定）
         return idx, torch.sqrt(dist2 + 1e-8)
-
-
-# 定义KNN查询的apply函数
-knnquery = KNNQuery.apply
 ```
 
 ### Point Transformer 残差块
@@ -413,4 +409,179 @@ class PointTransformerBlock(nn.Module):
         
         # 返回相同格式的数据
         return [p, x, o]
+```
+
+### 下采样层
+
+```python
+class TransitionDown(nn.Module):
+    """
+    点云下采样过渡层
+    功能：降低点云分辨率同时增加特征维度，保持批处理信息
+    """
+    def __init__(self, in_planes, out_planes, stride=1, nsample=16):
+        """
+        初始化下采样层
+        Args:
+            in_planes: 输入特征维度
+            out_planes: 输出特征维度  
+            stride: 下采样步长（stride=1表示无下采样，只做特征变换）
+            nsample: 邻域采样点数，用于局部特征聚合
+        """
+        super().__init__()
+        self.stride = stride    # 下采样率
+        self.nsample = nsample  # 邻域采样数
+        
+        if stride != 1:
+            # 下采样模式：需要处理坐标和特征，输出维度为3+in_planes
+            self.linear = nn.Linear(3 + in_planes, out_planes, bias=False)  # 无偏置，因为后面有BN
+            self.pool = nn.MaxPool1d(nsample)  # 最大池化，聚合邻域特征
+        else:
+            # 无下采样模式：只做特征变换
+            self.linear = nn.Linear(in_planes, out_planes, bias=False)
+        
+        # 共享的批归一化和激活函数
+        self.bn = nn.BatchNorm1d(out_planes)  # 批归一化
+        self.relu = nn.ReLU(inplace=True)     # ReLU激活函数（原地操作节省内存）
+        
+    def forward(self, pxo):
+        """
+        前向传播
+        Args:
+            pxo: 元组 (p, x, o)
+                p: 点坐标，形状 (n, 3)
+                x: 点特征，形状 (n, in_planes)
+                o: 批次索引，形状 (b) - 每个元素表示该批次点的结束索引
+        Returns:
+            元组 (p, x, o): 下采样后的点坐标、特征和批次索引
+        """
+        p, x, o = pxo  # 解包：点坐标, 点特征, 批次索引
+        
+        if self.stride != 1:
+            # ==================== 下采样模式 ====================
+            # 计算下采样后的批次索引 n_o 
+            n_o, count = [o[0].item() // self.stride], o[0].item() // self.stride
+            for i in range(1, o.shape[0]):
+                # 计算每个批次下采样后的点数
+                count += (o[i].item() - o[i-1].item()) // self.stride
+                n_o.append(count)
+            n_o = torch.IntTensor(n_o).to(o.device)  # 转换为张量并保持设备一致
+            
+            # 1. 最远点采样：从原始点云中选择代表性点
+            idx = pointops.furthestsampling(p, o, n_o)  # (m) - 采样点索引，m为下采样后的点数
+            n_p = p[idx.long(), :]  # (m, 3) - 下采样后的点坐标
+            
+            # 2. 查询和分组：为每个采样点找到邻域并聚合特征
+            # 输出形状: (m, 3 + in_planes, nsample)
+            # 包含：相对坐标(3) + 原始特征(in_planes)
+            x = pointops.queryandgroup(self.nsample, p, n_p, x, None, o, n_o, use_xyz=True)
+            
+            # 3. 线性变换 + BN + ReLU
+            # 先将特征维度转到最后： (m, 3+c, nsample) → (m, nsample, 3+c)
+            x = self.linear(x.transpose(1, 2).contiguous())  # (m, nsample, out_planes)
+            x = self.bn(x.transpose(1, 2).contiguous())      # (m, out_planes, nsample) - BN要求通道维度在前
+            x = self.relu(x)                                # ReLU激活
+            
+            # 4. 最大池化：在邻域维度上池化，得到每个点的最终特征
+            x = self.pool(x)          # (m, out_planes, 1) - 沿nsample维度池化
+            x = x.squeeze(-1)         # (m, out_planes) - 移除最后一个维度
+            
+            # 更新点和批次信息
+            p, o = n_p, n_o  # 使用下采样后的点坐标和批次索引
+            
+        else:
+            # ==================== 无下采样模式 ====================
+            # 只进行特征变换：Linear → BN → ReLU
+            x = self.linear(x)    # (n, in_planes) → (n, out_planes)
+            x = self.bn(x)        # 批归一化
+            x = self.relu(x)      # ReLU激活
+        
+        # 返回相同格式的数据
+        return [p, x, o]
+```
+**最远点采样（FPS）算法**：
+
+1. 初始化：随机选择一个起始点
+
+2. 迭代选择：
+
+    - 计算所有点到已选点集的最小距离
+
+    - 选择距离最大的点（即最远的点）
+    
+    - 重复直到选择足够多的点
+
+```python
+class FurthestSampling(Function):
+    """
+    最远点采样（Farthest Point Sampling）的自定义PyTorch函数
+    用于从点云中选择分布最均匀的点的子集
+    """
+    @staticmethod
+    def forward(ctx, xyz, offset, new_offset):
+        """
+        前向传播：执行最远点采样算法
+        
+        Args:
+            ctx: 上下文对象，用于存储反向传播需要的信息
+            xyz: 输入点云坐标，形状为 (n, 3)，需要是内存连续的
+            offset: 原始批次索引，形状为 (b)，每个元素表示该批次点的结束位置
+            new_offset: 目标批次索引，形状为 (b)，每个元素表示下采样后该批次点的结束位置
+            
+        Returns:
+            idx: 采样点的索引，形状为 (m)，其中 m = new_offset[-1]
+        """
+        # 确保输入张量是内存连续的
+        assert xyz.is_contiguous()
+        
+        n, b = xyz.shape[0], offset.shape[0]  # n: 总点数, b: 批次数
+        # 创建输出索引张量，大小为下采样后的总点数
+        idx = torch.zeros(new_offset[b-1].item(), dtype=torch.long, device=xyz.device)
+        
+        # CPU实现的最远点采样算法
+        start_idx = 0  # 当前批次的起始索引
+        result_idx = 0  # 结果中的当前写入位置
+        
+        # 遍历每个批次
+        for i in range(b):
+            # 计算当前批次的结束索引
+            end_idx = offset[i] if i < b else n
+            batch_size = end_idx - start_idx  # 当前批次的点数
+            
+            if batch_size > 0:
+                # 创建选择标记数组，初始全为False
+                selected = torch.zeros(batch_size, dtype=torch.bool, device=xyz.device)
+                # 随机选择第一个点（这里固定选择第一个点）
+                selected[0] = True
+                
+                # 初始化距离数组，存储每个点到已选点集的最小距离
+                dist = torch.full((batch_size,), float('inf'), device=xyz.device)
+                
+                # 计算当前批次需要采样的点数
+                if i == 0:
+                    num_to_sample = new_offset[i].item()  # 第一个批次
+                else:
+                    num_to_sample = new_offset[i].item() - new_offset[i-1].item()  # 后续批次
+                
+                # 执行最远点采样迭代
+                for j in range(1, min(batch_size, num_to_sample)):
+                    # 更新距离：计算所有点到最新选中点的距离，并取最小值
+                    last_selected = torch.where(selected)[0][-1]  # 最后一个选中的点
+                    new_dist = torch.sum((batch_xyz - batch_xyz[last_selected]) ** 2, dim=1)  # 计算欧氏距离平方
+                    dist = torch.minimum(dist, new_dist)  # 保持每个点的最小距离
+                    
+                    # 选择距离最大的点（离已选点集最远的点）
+                    next_point = torch.argmax(dist)
+                    selected[next_point] = True  # 标记为已选
+                    dist[next_point] = 0  # 将该点的距离设为0，避免重复选择
+                
+                # 存储选中的索引（需要加上批次的起始偏移）
+                selected_indices = torch.where(selected)[0] + start_idx
+                idx[result_idx:result_idx + len(selected_indices)] = selected_indices
+                result_idx += len(selected_indices)
+            
+            # 移动到下一个批次
+            start_idx = end_idx
+        
+        return idx
 ```
