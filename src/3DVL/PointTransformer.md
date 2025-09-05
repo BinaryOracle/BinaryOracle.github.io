@@ -328,6 +328,8 @@ knnquery = KNNQuery.apply
 
 ### Point Transformer 残差块
 
+`PointTransformerBlock` 类是 `Point Transformer` 残差块，是` Point Transformer` 架构中的基本构建模块 , 其代码实现如下所示:
+
 ```python
 class PointTransformerBlock(nn.Module):
     """
