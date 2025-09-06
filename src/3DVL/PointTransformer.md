@@ -857,3 +857,121 @@ def interpolation(xyz, new_xyz, feat, offset, new_offset, k=3):
     
     return new_feat
 ```
+
+### Point Transformer 主模型
+
+```python
+class PointTransformerSeg(nn.Module):
+    """
+    Point Transformer 用于点云语义分割的网络
+    采用编码器-解码器结构（类似 U-Net），
+    编码器用于下采样和提取抽象特征，
+    解码器用于上采样和特征融合，最终输出每个点的类别概率。
+    """
+    def __init__(self, block, blocks, c=6, k=13):
+        """
+        Args:
+            block: 点变换模块类型（Point Transformer Block）
+            blocks: 每一层包含 block 数量列表
+            c: 输入点特征维度（通常是 xyz + 额外特征）
+            k: 分类类别数量
+        """
+        super().__init__()
+        self.c = c
+        self.in_planes, planes = c, [32, 64, 128, 256, 512]  # 编码器各层输出通道
+        fpn_planes, fpnhead_planes, share_planes = 128, 64, 8
+        stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]  # 下采样比例与邻居点数
+
+        # ========== 编码器 ========== 
+        # enc1: 分辨率 N/1
+        self.enc1 = self._make_enc(block, planes[0], blocks[0], share_planes, stride=stride[0], nsample=nsample[0])
+        # enc2: 分辨率 N/4
+        self.enc2 = self._make_enc(block, planes[1], blocks[1], share_planes, stride=stride[1], nsample=nsample[1])
+        # enc3: 分辨率 N/16
+        self.enc3 = self._make_enc(block, planes[2], blocks[2], share_planes, stride=stride[2], nsample=nsample[2])
+        # enc4: 分辨率 N/64
+        self.enc4 = self._make_enc(block, planes[3], blocks[3], share_planes, stride=stride[3], nsample=nsample[3])
+        # enc5: 分辨率 N/256
+        self.enc5 = self._make_enc(block, planes[4], blocks[4], share_planes, stride=stride[4], nsample=nsample[4])
+
+        # ========== 解码器 ========== 
+        # dec5: 解码器最深层，转换 p5 特征（is_head=True 表示输出头，不进行 skip 融合）
+        self.dec5 = self._make_dec(block, planes[4], 2, share_planes, nsample=nsample[4], is_head=True)
+        # dec4: 融合 p5 与 p4
+        self.dec4 = self._make_dec(block, planes[3], 2, share_planes, nsample=nsample[3])
+        # dec3: 融合 p4 与 p3
+        self.dec3 = self._make_dec(block, planes[2], 2, share_planes, nsample=nsample[2])
+        # dec2: 融合 p3 与 p2
+        self.dec2 = self._make_dec(block, planes[1], 2, share_planes, nsample=nsample[1])
+        # dec1: 融合 p2 与 p1
+        self.dec1 = self._make_dec(block, planes[0], 2, share_planes, nsample=nsample[0])
+
+        # 分类头：每个点输出 k 个类别得分
+        self.cls = nn.Sequential(
+            nn.Linear(planes[0], planes[0]),
+            nn.BatchNorm1d(planes[0]),
+            nn.ReLU(inplace=True),
+            nn.Linear(planes[0], k)
+        )
+
+    # ========== 构建编码器层 ========== 
+    def _make_enc(self, block, planes, blocks, share_planes=8, stride=1, nsample=16):
+        layers = []
+        # TransitionDown: 点云下采样 + 特征升维
+        layers.append(TransitionDown(self.in_planes, planes * block.expansion, stride, nsample))
+        self.in_planes = planes * block.expansion
+        # 后续 block 叠加处理下采样后的特征
+        for _ in range(1, blocks):
+            layers.append(block(self.in_planes, self.in_planes, share_planes, nsample=nsample))
+        return nn.Sequential(*layers)
+
+    # ========== 构建解码器层 ========== 
+    def _make_dec(self, block, planes, blocks, share_planes=8, nsample=16, is_head=False):
+        layers = []
+        # TransitionUp: 点云上采样 + 特征融合
+        # is_head=True 时表示输出层，不进行 skip 融合
+        layers.append(TransitionUp(self.in_planes, None if is_head else planes * block.expansion))
+        self.in_planes = planes * block.expansion
+        # 后续 block 叠加处理上采样后的特征
+        for _ in range(1, blocks):
+            layers.append(block(self.in_planes, self.in_planes, share_planes, nsample=nsample))
+        return nn.Sequential(*layers)
+
+    # ========== 前向传播 ========== 
+    def forward(self, pxo):
+        """
+        Args:
+            pxo: tuple (p0, x0, o0)
+                p0: (n,3) 点坐标
+                x0: (n,c) 点特征
+                o0: (b) 每个 batch 的点累积偏移
+        Returns:
+            x: (n,k) 每个点的类别预测
+        """
+        p0, x0, o0 = pxo
+
+        # 如果输入特征只有 xyz，直接使用 p0，否则拼接额外特征
+        x0 = p0 if self.c == 3 else torch.cat((p0, x0), 1)
+
+        # ================= 编码器 =================
+        p1, x1, o1 = self.enc1([p0, x0, o0])
+        p2, x2, o2 = self.enc2([p1, x1, o1])
+        p3, x3, o3 = self.enc3([p2, x2, o2])
+        p4, x4, o4 = self.enc4([p3, x3, o3])
+        p5, x5, o5 = self.enc5([p4, x4, o4])
+
+        # ================= 解码器 =================
+        # 注意 decX[0] 是 TransitionUp，上采样层
+        # decX[1:] 是 Point Transformer Block，处理上采样后的特征
+        x5 = self.dec5[1:]([p5, self.dec5[0]([p5, x5, o5]), o5])[1]
+        x4 = self.dec4[1:]([p4, self.dec4[0]([p4, x4, o4], [p5, x5, o5]), o4])[1]
+        x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]
+        x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
+        x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
+
+        # ================= 分类头 =================
+        x = self.cls(x1)  # 输出每个点的 k 类得分
+
+        return x
+```
+> **切片 self.dec5[1:]** : 在 Python 中，nn.Sequential 支持切片操作，返回的是 新的 nn.Sequential 对象，而不是元组。
