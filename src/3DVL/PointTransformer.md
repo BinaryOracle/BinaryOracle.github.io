@@ -805,3 +805,55 @@ class TransitionUp(nn.Module):
             
         return x
 ```
+
+**该插值流程就是**：对每个目标点，找到源点云的 k 个最近邻 → 根据反距离加权分配权重 → 用邻居特征加权求和 → 得到目标点特征。
+
+```python
+def interpolation(xyz, new_xyz, feat, offset, new_offset, k=3):
+    """
+    点云特征插值函数（基于 KNN + 反距离加权）
+    
+    Args:
+        xyz: (m, 3) 源点云坐标（低分辨率点云，比如 encoder 输出）
+        new_xyz: (n, 3) 目标点云坐标（高分辨率点云，比如 decoder 对应层）
+        feat: (m, c) 源点云的特征
+        offset: (b) 每个 batch 的点数累积和（源点云）
+        new_offset: (b) 每个 batch 的点数累积和（目标点云）
+        k: int，插值时选取的近邻点个数（默认3）
+    
+    Returns:
+        new_feat: (n, c)，插值到目标点上的特征
+    """
+    # 确保输入 tensor 在内存中是连续存放的，提高计算效率
+    assert xyz.is_contiguous() and new_xyz.is_contiguous() and feat.is_contiguous()
+    
+    # 在源点云 xyz 中，查找目标点云 new_xyz 的 k 个最近邻
+    # idx: (n, k) 最近邻点索引
+    # dist: (n, k) 最近邻点对应的欧氏距离
+    idx, dist = knnquery(k, xyz, new_xyz, offset, new_offset)  # (n, 3), (n, 3)
+    
+    # 计算距离的倒数，避免除零加一个小量
+    dist_recip = 1.0 / (dist + 1e-8)  # (n, k)
+    
+    # 对权重进行归一化，使每个点的权重和为 1
+    norm = torch.sum(dist_recip, dim=1, keepdim=True)  # (n, 1)
+    weight = dist_recip / norm  # (n, k)
+    
+    # 初始化插值后的特征 (n, c)，全零
+    new_feat = torch.zeros((new_xyz.shape[0], feat.shape[1]), dtype=feat.dtype)
+    
+    # 遍历每个近邻点（这里默认 k=3）
+    for i in range(k):
+        indices = idx[:, i].long()  # 第 i 个邻居的索引
+        # 有效性检查：确保索引在合法范围内
+        valid_mask = (indices >= 0) & (indices < feat.shape[0])
+        
+        if valid_mask.any():
+            # 对有效邻居点：加权累加特征
+            # feat[indices] : (n, c) 邻居点特征
+            # weight[:, i].unsqueeze(-1) : (n, 1) 权重
+            # → 逐点乘法，最后累加到 new_feat
+            new_feat[valid_mask] += feat[indices[valid_mask], :] * weight[valid_mask, i].unsqueeze(-1)
+    
+    return new_feat
+```
