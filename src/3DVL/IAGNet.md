@@ -7,7 +7,7 @@ category:
 tag:
   - 3D-VL
   - 3D Affordance
-  - 编辑中
+  - 已发布
 footer: 技术共建，知识共享
 date: 2025-07-11
 author:
@@ -667,4 +667,43 @@ class Decoder(nn.Module):
         #   - 全局 affordance 分类结果
         #   - image-aligned 的特征
         return _3daffordance, logits, [F_ia.mT.contiguous(), I_align.mT.contiguous()]
+```
+
+核心训练过程如下:
+
+```python
+def main(opt, dict):
+    ...
+
+    model = get_IAGNet(img_model_path=dict['res18_pre'], N_p=dict['N_p'], emb_dim=dict['emb_dim'],
+                       proj_dim=dict['proj_dim'], num_heads=dict['num_heads'], N_raw=dict['N_raw'],
+                       num_affordance = dict['num_affordance'])
+
+
+    criterion_hm = HM_Loss()
+    criterion_ce = nn.CrossEntropyLoss()
+
+    ...
+
+    '''
+    Training
+    '''
+    for epoch in range(start_epoch+1, dict['Epoch']):
+        ...
+        for i,(img, points, labels, logits_labels, sub_box, obj_box) in enumerate(train_loader):
+            ...
+            for point, label, logits_label in zip(points, labels, logits_labels):
+                ...
+                _3d, logits, to_KL = model(img, point, sub_box, obj_box)
+
+                loss_hm = criterion_hm(_3d, label)
+                loss_ce = criterion_ce(logits, logits_label)
+                loss_kl = kl_div(to_KL[0], to_KL[1])
+
+                temp_loss += loss_hm + opt.loss_cls*loss_ce + opt.loss_kl*loss_kl
+
+            temp_loss.backward()
+            optimizer.step()
+            loss_sum += temp_loss.item()
+    ...
 ```
