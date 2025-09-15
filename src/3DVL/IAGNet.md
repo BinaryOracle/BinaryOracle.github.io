@@ -299,13 +299,15 @@ class IAG(nn.Module):
         # 3. PointNet编码点云
         # (B,3,2048) , (B,320,512) , (B,512,128) ， (B,512,64)
         F_p_wise = self.point_encoder(xyz)
-        # 4.  
+        # 4. 建立目标物体局部交互区域到点云局部区域的特征对应映射关系 
+        # (B,80,512)
         F_j = self.JRA(F_i, F_p_wise[-1][1])
         # 5. 
+        # (B,80,512)
         affordance = self.ARM(F_j, F_s, F_e)
-
+        # 6. 
         _3daffordance, logits, to_KL = self.decoder(F_j, affordance, F_p_wise)
-
+         
         return _3daffordance, logits, to_KL
 ```
 
