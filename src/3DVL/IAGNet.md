@@ -675,35 +675,227 @@ class Decoder(nn.Module):
 def main(opt, dict):
     ...
 
-    model = get_IAGNet(img_model_path=dict['res18_pre'], N_p=dict['N_p'], emb_dim=dict['emb_dim'],
-                       proj_dim=dict['proj_dim'], num_heads=dict['num_heads'], N_raw=dict['N_raw'],
-                       num_affordance = dict['num_affordance'])
+    # ---------- 初始化模型 ----------
+    model = get_IAGNet(
+        img_model_path=dict['res18_pre'],  # ResNet18预训练权重路径
+        N_p=dict['N_p'],                    # point cloud subset size
+        emb_dim=dict['emb_dim'],            # embedding dimension
+        proj_dim=dict['proj_dim'],          # 投影维度
+        num_heads=dict['num_heads'],        # attention头数
+        N_raw=dict['N_raw'],                # 原始点云点数
+        num_affordance=dict['num_affordance']  # affordance类别数
+    )
 
-
-    criterion_hm = HM_Loss()
-    criterion_ce = nn.CrossEntropyLoss()
+    # ---------- 损失函数 ----------
+    criterion_hm = HM_Loss()                # heatmap loss: 用于点级别 3D affordance mask
+    criterion_ce = nn.CrossEntropyLoss()    # 全局分类损失，用于 affordance 分类
 
     ...
 
     '''
-    Training
+    Training Loop
     '''
     for epoch in range(start_epoch+1, dict['Epoch']):
         ...
-        for i,(img, points, labels, logits_labels, sub_box, obj_box) in enumerate(train_loader):
-            ...
+        for i, (img, points, labels, logits_labels, sub_box, obj_box) in enumerate(train_loader):
+            # img: [B, 3, H, W]           图像
+            # points: [B, 3, N_raw]       原始点云
+            # labels: [B, N, 1]           点级别3D affordance mask
+            # logits_labels: [B, num_affordance] 全局分类标签
+            # sub_box / obj_box: 交互主体和物体的bounding box
+
+            temp_loss = 0.0
+
+            # 有些训练实现中会按 batch 内每个样本循环处理
             for point, label, logits_label in zip(points, labels, logits_labels):
-                ...
+                # point: [3, N_raw] 单个样本点云
+                # label: [N, 1] 单个样本点级mask
+                # logits_label: [num_affordance] 单个样本全局标签
+
+                # ---------- 模型前向传播 ----------
                 _3d, logits, to_KL = model(img, point, sub_box, obj_box)
+                # _3d: [N, 1] 点级别3D affordance预测
+                # logits: [num_affordance] 全局 affordance 分类预测
+                # to_KL: [F_ia, I_align] 中间特征，用于 KL 散度正则化
 
-                loss_hm = criterion_hm(_3d, label)
-                loss_ce = criterion_ce(logits, logits_label)
-                loss_kl = kl_div(to_KL[0], to_KL[1])
+                # ---------- 损失计算 ----------
+                loss_hm = criterion_hm(_3d, label)           # 点级mask loss
+                loss_ce = criterion_ce(logits, logits_label) # 全局分类 loss
+                loss_kl = kl_div(to_KL[0], to_KL[1])         # KL散度 loss，正则化特征对齐
 
-                temp_loss += loss_hm + opt.loss_cls*loss_ce + opt.loss_kl*loss_kl
+                # ---------- 总损失 ----------
+                # temp_loss = heatmap loss + 分类 loss + KL loss (可加权)
+                temp_loss += loss_hm + opt.loss_cls * loss_ce + opt.loss_kl * loss_kl
 
-            temp_loss.backward()
-            optimizer.step()
+            # ---------- 反向传播 ----------
+            temp_loss.backward()  # 计算梯度
+            optimizer.step()      # 更新模型参数
+            optimizer.zero_grad() # 清空梯度，准备下一步
+
+            # 累计损失，用于记录
             loss_sum += temp_loss.item()
+
     ...
+```
+
+> 以下内容待继续思考...
+
+IAGNet 模型实现主要用到的以下三个损失函数:
+
+1️⃣ **Heatmap Loss (HM_Loss)**
+
+**作用**：用于点级别 3D affordance mask 的监督，指导模型预测点云上哪些点属于可交互区域。
+
+**输入输出**：
+
+* 预测：`_3daffordance`，每个点的概率 `[B, N, 1]`
+
+* 标签：`label`，每个点的真实 affordance mask `[B, N, 1]`
+
+**原理**：通常是 **MSE 或 L2 损失**，计算预测概率和真实 mask 之间的差异：
+
+$$
+\text{loss}_{hm} = \frac{1}{N} \sum_{i=1}^N (\hat{y}_i - y_i)^2
+$$
+
+**直观理解**：让模型逐点学习“这个点是不是 affordance 区域”。
+
+---
+
+2️⃣ **Cross-Entropy Loss (CE Loss)**
+
+**作用**：用于全局 affordance 分类（判断物体整体能做什么交互动作）。
+
+**输入输出**：
+
+* 预测：`logits` `[B, num_affordance]`
+
+* 标签：`logits_labels` `[B, num_affordance]`（one-hot 或 class index）
+
+**原理**：标准交叉熵损失，衡量预测类别分布和真实分布之间的差异：
+
+$$
+\text{loss}_{ce} = - \sum_{c=1}^{num\_aff} y_c \log(\hat{p}_c)
+$$
+
+**直观理解**：让模型学会预测物体整体的 affordance 类别。
+
+---
+
+3️⃣ **KL Divergence Loss (KL Loss)**
+
+**作用**：用于正则化 **JRA 输出的联合特征**，让图像区域特征和点云区域特征在特征空间对齐得更一致。
+
+**输入输出**：
+
+* `to_KL = [F_ia, I_align]`，分别是图像对齐特征和点云对齐特征
+
+**原理**：计算两组特征的概率分布差异：
+
+$$
+\text{loss}_{kl} = D_{KL}(P \| Q) = \sum_i P_i \log \frac{P_i}{Q_i}
+$$
+
+**直观理解**：约束跨模态特征一致，让 2D-3D 对齐更准确，从而提高点级 affordance mask 的质量。
+
+---
+
+🔑 **总损失**
+
+最终训练目标是三者加权求和：
+
+$$
+\text{Loss} = \text{HM\_Loss} + \lambda_{cls} \cdot \text{CE\_Loss} + \lambda_{kl} \cdot \text{KL\_Loss}
+$$
+
+* HM\_Loss → 点级掩码
+
+* CE\_Loss → 全局类别
+
+* KL\_Loss → 跨模态特征对齐
+
+这样模型既学到 **逐点交互区域**，也学到 **物体整体 affordance**，还保证 **图像-点云特征一致性**。
+
+
+```python
+def kl_div(p_out, q_out, get_softmax=True):
+    KLD = nn.KLDivLoss(reduction='batchmean')
+    B = p_out.size(0)
+
+    if get_softmax:
+        p_out = F.softmax(p_out.view(B,-1),dim=-1)
+        q_out = F.log_softmax(q_out.view(B,-1),dim=-1)
+
+    kl_loss = KLD(q_out, p_out)
+
+    return kl_loss
+
+class HM_Loss(nn.Module):
+    def __init__(self):
+        super(HM_Loss, self).__init__()
+        self.gamma = 2
+        self.alpha = 0.25
+
+    def forward(self, pred, target):
+        #[B, N, 18]
+        temp1 = -(1-self.alpha)*torch.mul(pred**self.gamma,
+                           torch.mul(1-target, torch.log(1-pred+1e-6)))
+        temp2 = -self.alpha*torch.mul((1-pred)**self.gamma,
+                           torch.mul(target, torch.log(pred+1e-6)))
+        temp = temp1+temp2
+        CELoss = torch.sum(torch.mean(temp, (0, 1)))
+
+        intersection_positive = torch.sum(pred*target, 1)
+        cardinality_positive = torch.sum(torch.abs(pred)+torch.abs(target), 1)
+        dice_positive = (intersection_positive+1e-6) / \
+            (cardinality_positive+1e-6)
+
+        intersection_negative = torch.sum((1.-pred)*(1.-target), 1)
+        cardinality_negative = torch.sum(
+            2-torch.abs(pred)-torch.abs(target), 1)
+        dice_negative = (intersection_negative+1e-6) / \
+            (cardinality_negative+1e-6)
+        temp3 = torch.mean(1.5-dice_positive-dice_negative, 0)
+
+        DICELoss = torch.sum(temp3)
+        return CELoss+1.0*DICELoss
+
+class CrossModalCenterLoss(nn.Module):
+    """Center loss.    
+    Args:
+        num_classes (int): number of classes.
+        feat_dim (int): feature dimension.
+    """
+    def __init__(self, num_classes, feat_dim=512, local_rank=None):
+        super(CrossModalCenterLoss, self).__init__()
+        self.num_classes = num_classes
+        self.feat_dim = feat_dim
+        self.local_rank = local_rank
+
+        if self.local_rank != None:
+            self.device = torch.device('cuda', self.local_rank)
+        else:
+            self.device = torch.device('cuda:0')
+        self.centers = nn.Parameter(torch.randn(self.num_classes, self.feat_dim).to(self.device))
+
+    def forward(self, x, labels):
+        """
+        Args:
+            x: feature matrix with shape (batch_size, feat_dim).
+            labels: ground truth labels with shape (batch_size).
+        """
+        batch_size = x.size(0)
+        distmat = torch.pow(x, 2).sum(dim=1, keepdim=True).expand(batch_size, self.num_classes) + \
+                  torch.pow(self.centers, 2).sum(dim=1, keepdim=True).expand(self.num_classes, batch_size).t()
+        temp = torch.mm(x, self.centers.t())
+        distmat = distmat - 2*temp
+
+        classes = torch.arange(self.num_classes).long()
+        classes = classes.to(self.device)
+        labels = labels.unsqueeze(1).expand(batch_size, self.num_classes)
+        mask = labels.eq(classes.expand(batch_size, self.num_classes))
+        dist = distmat * mask.float()
+        loss = dist.clamp(min=1e-12, max=1e+12).sum() / batch_size
+
+        return loss
 ```
