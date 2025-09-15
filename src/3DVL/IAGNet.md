@@ -305,7 +305,7 @@ class IAG(nn.Module):
         # 5. 
         # (B,80,512)
         affordance = self.ARM(F_j, F_s, F_e)
-        # 6. 
+        # 6. 解码
         _3daffordance, logits, to_KL = self.decoder(F_j, affordance, F_p_wise)
          
         return _3daffordance, logits, to_KL
@@ -428,6 +428,40 @@ class Joint_Region_Alignment(nn.Module):
 
 ![](IAGNet/6.png)
 
+ARM 的任务是：**在对齐后的 joint feature 基础上，融合交互主体和环境的语义线索，显式地“揭示”出物体上可能的 affordance 区域。**
+
+换句话说，它要回答：
+
+> “在这个交互场景里，物体的哪一部分因为主体和环境的作用而具备可交互潜能？”
+
+1. **上下文注入 (Context injection)**
+
+   * `F_s` 提供“谁在和物体交互”（比如人手/手臂）
+  
+   * `F_e` 提供“交互发生的场景背景”
+  
+   * 将这些信息和 `F_j` 融合，可以避免仅凭物体几何去猜 affordance。
+
+2. **显式区域挖掘 (Explicit affordance mining)**
+
+   * 对齐特征 `F_j` 已经把“图像交互提示区域 ↔ 点云几何局部”对应起来，但还没有明确说“这里就是 affordance 区域”。
+  
+   * ARM 进一步处理后，输出一个更抽象的 **affordance 语义表示**，告诉 decoder 哪些区域应该被激活。
+
+3. **输出 → 送入 Decoder**
+
+   * `affordance` 被送进 `self.decoder(F_j, affordance, F_p_wise)`
+  
+   * Decoder 再结合原始点云逐点特征，把这些抽象语义转化为 **点级别的 affordance mask**。
+
+可以把 **JRA + ARM** 的关系想成：
+
+* **JRA**：帮你在“交互图片里的区域” 和 “点云里的几何部分”之间拉了一根线（对齐）。
+
+* **ARM**：在这根线的两端加上“语义电流”（主体 & 背景），让网络明确知道哪些区域真正具备 **affordance**。
+
+**ARM 模块的作用是将 JRA 对齐得到的图像–点云联合特征，与交互主体和环境语义结合，挖掘并生成显式的 affordance 表示，为 Decoder 输出逐点 affordance mask 提供语义指导。**
+
 ```python
 class Affordance_Revealed_Module(nn.Module):
     def __init__(self, emb_dim, proj_dim):
@@ -460,7 +494,7 @@ class Affordance_Revealed_Module(nn.Module):
         # 拉平: (B,512,4,4) --> (B,512,4*4)
         F_s = F_s.view(B, C, -1)                                        #[B, N_i, C]
         F_e = F_e.view(B, C, -1)                                        #[B, N_i, C]
-        # 利用联合建模特征作为query，从交互区域特征和背景特征中提取相关信息分别单独加到自己身上
+        # 利用联合建模特征作为query，从目标主体区域特征和背景特征中提取相关信息分别单独加到自己身上
         Theta_1, Theta_2 = self.cross_atten(F_j, F_s.mT, F_e.mT)        #[B, C, N_p + N_i]
 
         # 通道维度完成拼接后，利用1x1卷积完成通道维度上的信息融合 
@@ -474,67 +508,125 @@ class Affordance_Revealed_Module(nn.Module):
 ```python
 class Decoder(nn.Module):
     def __init__(self, additional_channel, emb_dim, N_p, N_raw, num_affordance):
+        """
+        Decoder 模块
+        参数:
+            additional_channel: 附加输入通道数
+            emb_dim: 特征嵌入维度
+            N_p: 点云子集数量 (point number for part/point-level alignment)
+            N_raw: 原始点云点数
+            num_affordance: affordance 分类数量
+        """
+
         class SwapAxes(nn.Module):
+            """交换张量的第1维和第2维, 用于Linear/BN的维度匹配"""
             def __init__(self):
                 super().__init__()
             
             def forward(self, x):
+                # x: [B, N, C] -> [B, C, N]
                 return x.transpose(1, 2)
+
         super().__init__()
         
         self.emb_dim = emb_dim
         self.N_p = N_p
         self.N = N_raw
         self.num_affordance = num_affordance
-        #upsample
+
+        # ---------- 特征传播层 (PointNet++ Feature Propagation) ----------
+        # 逐层上采样，将 encoder 输出的层次化点特征恢复到原始点数 N
         self.fp3 = PointNetFeaturePropagation(in_channel=512+self.emb_dim, mlp=[768, 512])  
         self.fp2 = PointNetFeaturePropagation(in_channel=832, mlp=[768, 512]) 
         self.fp1 = PointNetFeaturePropagation(in_channel=518+additional_channel, mlp=[512, 512]) 
-        self.pool = nn.AdaptiveAvgPool1d(1)
 
+        # 全局池化 (用于 part-level 和 image-level 特征压缩)
+        self.pool = nn.AdaptiveAvgPool1d(1)   # 输入 [B, C, N] -> 输出 [B, C, 1]
+
+        # ---------- 输出头 (3D affordance 预测) ----------
         self.out_head = nn.Sequential(
-            nn.Linear(self.emb_dim, self.emb_dim // 8),
-            SwapAxes(),
+            nn.Linear(self.emb_dim, self.emb_dim // 8),  # [B, N, C] -> [B, N, C/8]
+            SwapAxes(),                                  # [B, N, C/8] -> [B, C/8, N] 方便 BatchNorm1d
             nn.BatchNorm1d(self.emb_dim // 8),
             nn.ReLU(),
-            SwapAxes(),
-            nn.Linear(self.emb_dim // 8, 1),
+            SwapAxes(),                                  # [B, C/8, N] -> [B, N, C/8]
+            nn.Linear(self.emb_dim // 8, 1),             # [B, N, C/8] -> [B, N, 1]
         )
 
+        # ---------- 分类头 (affordance 分类) ----------
         self.cls_head = nn.Sequential(
-            nn.Linear(2*self.emb_dim, self.emb_dim // 2),
+            nn.Linear(2*self.emb_dim, self.emb_dim // 2),      # [B, 2C] -> [B, C/2]
             nn.BatchNorm1d(self.emb_dim // 2),
             nn.ReLU(),
-            nn.Linear(self.emb_dim // 2, self.num_affordance),
+            nn.Linear(self.emb_dim // 2, self.num_affordance), # [B, C/2] -> [B, num_affordance]
             nn.BatchNorm1d(self.num_affordance)
         )
 
         self.sigmoid = nn.Sigmoid()
 
+
     def forward(self, F_j, affordance, encoder_p):
+        """
+        前向传播
+        输入:
+            F_j: [B, N_p + N_i, C]  (joint features, part/image 对齐后的特征)
+            affordance: [B, N_p + N_i, C] (affordance 特征)
+            encoder_p: [p0, p1, p2, p3] (encoder 分层特征, PointNet++ 输出)
+        输出:
+            _3daffordance: [B, N, 1]  (点云每个点的 affordance 激活概率)
+            logits: [B, num_affordance] (全局 affordance 分类结果)
+            [F_ia^T, I_align^T]: [B, C, N_i], [B, C, N_i] (image-aligned features)
+        """
 
-        '''
-        obj --->        [F_j]
-        affordance ---> [B, N_p + N_i, C]
-        encoder_p  ---> [Hierarchy feature]
-        '''
-        B,_,_ = F_j.size()
+        B, _, _ = F_j.size()
         p_0, p_1, p_2, p_3 = encoder_p
-        P_align, I_align = torch.split(F_j, split_size_or_sections=self.N_p, dim=1)     #[B, N_p, C] --- [B, N_i, C]
-        F_pa, F_ia = torch.split(affordance, split_size_or_sections = self.N_p, dim=1)  #[B, N_p, C] --- [B, N_i, C]
 
-        up_sample = self.fp3(p_2[0], p_3[0], p_2[1], P_align.mT)                        #[B, emb_dim, npoint_sa2]
-        up_sample = self.fp2(p_1[0], p_2[0], p_1[1], up_sample)                         #[B, emb_dim, npoint_sa1]                        
-        up_sample = self.fp1(p_0[0], p_1[0], torch.cat([p_0[0], p_0[1]],1), up_sample)  #[B, emb_dim, N]
+        # --- 将 joint feature 拆成 part-aligned (P_align) 和 image-aligned (I_align) ---
+        P_align, I_align = torch.split(F_j, split_size_or_sections=self.N_p, dim=1)     
+        # P_align: [B, N_p, C]
+        # I_align: [B, N_i, C]
 
-        F_pa_pool = self.pool(F_pa.mT)                                                  #[B, emb_dim, 1]
-        F_ia_pool = self.pool(F_ia.mT)                                                  #[B, emb_dim, 1]
-        logits = torch.cat((F_pa_pool, F_ia_pool), dim=1)                               #[B, 2*emb_dim, 1]
-        logits = self.cls_head(logits.view(B,-1))
+        # --- 将 affordance 特征拆分为 part-level 和 image-level ---
+        F_pa, F_ia = torch.split(affordance, split_size_or_sections=self.N_p, dim=1)  
+        # F_pa: [B, N_p, C]
+        # F_ia: [B, N_i, C]
 
-        _3daffordance = up_sample * F_pa_pool.expand(-1,-1,self.N)                      #[B, emb_dim, 2048]
-        _3daffordance = self.out_head(_3daffordance.mT)                                    #[B, 2048, 1]
-        _3daffordance = self.sigmoid(_3daffordance)
+        # --- 上采样特征 (逐级恢复点云分辨率) ---
+        # p_k: [点坐标, 点特征]
+        up_sample = self.fp3(p_2[0], p_3[0], p_2[1], P_align.mT)                        
+        # P_align.mT: [B, C, N_p]  -> 融合到 SA2 层点数 (npoint_sa2)
+        # 输出: [B, C, npoint_sa2]
 
+        up_sample = self.fp2(p_1[0], p_2[0], p_1[1], up_sample)                         
+        # 输出: [B, C, npoint_sa1]
+
+        up_sample = self.fp1(p_0[0], p_1[0], torch.cat([p_0[0], p_0[1]],1), up_sample)  
+        # 输出: [B, C, N]  (恢复到原始点数 N)
+
+        # --- 全局池化 (part/image 特征池化) ---
+        F_pa_pool = self.pool(F_pa.mT)   # [B, C, N_p] -> [B, C, 1]
+        F_ia_pool = self.pool(F_ia.mT)   # [B, C, N_i] -> [B, C, 1]
+
+        # --- 分类预测 (全局 affordance 类别预测) ---
+        logits = torch.cat((F_pa_pool, F_ia_pool), dim=1)   # [B, 2C, 1]
+        logits = self.cls_head(logits.view(B,-1))           # [B, num_affordance]
+
+        # --- 3D affordance 区域预测 (点级别) ---
+        _3daffordance = up_sample * F_pa_pool.expand(-1, -1, self.N)  
+        # up_sample: [B, C, N]
+        # F_pa_pool: [B, C, 1] -> expand: [B, C, N]
+        # 相乘: [B, C, N]
+
+        _3daffordance = self.out_head(_3daffordance.mT)  
+        # _3daffordance.mT: [B, N, C]
+        # out_head: [B, N, 1]
+
+        _3daffordance = self.sigmoid(_3daffordance)         
+        # [B, N, 1], 每个点的 affordance 概率 (0~1)
+
+        # 返回:
+        #   - 点级别 3D affordance mask
+        #   - 全局 affordance 分类结果
+        #   - image-aligned 的特征
         return _3daffordance, logits, [F_ia.mT.contiguous(), I_align.mT.contiguous()]
 ```
