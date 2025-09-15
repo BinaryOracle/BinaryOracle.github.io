@@ -80,7 +80,29 @@ author:
 
 2. dataset available
 
-## 3DGS
+## 3D Gaussian Splatting (3DGS)
 
 ### [GEAL (CVPR 2025)](https://arxiv.org/abs/2412.09511)
+
+特点:
+
+1. "Knowledge Distillation" from 2D to 3D: Transfer the semantic capabilities of pre-trained 2D models to the 3D affordance prediction model through Gaussian splat mapping, cross-modal consistency alignment, and multi-scale fusion.
+
+2. Noisy Dataset: Construct a new benchmark with multiple types of noise/damage to evaluate the generalization and robustness of the model under real/harsh conditions.
+
+![](affordance_grounding复盘/3.png)
+
+损失函数:
+
+1. BCE
+
+2. Dice Loss
+
+3. Consistency Loss（MSE 损失）
+
+现状:
+
+1. wait for code release
+
+2. wait for dataset release
 
