@@ -73,6 +73,18 @@ author:
 
 ## 点云 + 图像
 
+### [IAGNet (ICCV 2023)](https://arxiv.org/abs/2303.10437)
+
+特点:
+
+
+
+损失函数:
+
+
+现状:
+
+
 ## 点云 + 文本 + 图像
 
 ### [GREAT (CVPR 2025)](https://arxiv.org/abs/2411.19626)

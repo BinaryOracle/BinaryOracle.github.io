@@ -353,77 +353,15 @@ class IAG(nn.Module):
         return obj_feature, sub_feature, Scene_mask_feature
 ```
 
-```mermaid
----
-title: Joint Region Alignment (JRA) 流程图
----
-flowchart TB
-    subgraph 输入特征
-        F_i["图像特征 F_i [B, 512, 4, 4]"]
-        F_p["点云特征 F_p [B, 512, 64]"]
-    end
+JRA 模块就是在图像和点云之间建立“局部区域级别”的对应关系，让 2D 交互信号能准确落到 3D 对象上；具体来说:
 
-    subgraph 特征投影
-        F_i_flat["展平图像特征 [B, 512, 16]"]
-        to_common["公共空间投影 (共享MLP)"]
-        I["投影后图像特征 I [B, 512, 16]"]
-        P["投影后点云特征 P [B, 512, 64]"]
-    end
+1. 图像分支提取到的是 2D 目标区域的特征，包含了交互提示（比如“人手接触杯子的边缘”）；
 
-    subgraph 跨模态交互
-        phi["相似度矩阵 phi = Pᵀ·I / √d [B, 64, 16]"]
-        phi_p["点云→图像权重 softmax(phi, dim=1)"]
-        phi_i["图像→点云权重 softmax(phi, dim=-1)"]
-    end
+2. 点云分支提取到的是 3D 物体点云的区域特征，包含了几何结构（比如“杯子的边缘曲面”）；
 
-    subgraph 特征增强
-        I_enhance["图像增强特征 I_enhance = P·phi_p [B, 512, 16]"]
-        P_enhance["点云增强特征 P_enhance = I·phi_iᵀ [B, 512, 64]"]
-    end
+3. JRA 模块通过 " 投影统一 → 跨模态相似性匹配 → 局部自注意力 → 全局自注意力 " ，在共享空间里把图像的局部区域和点云的局部区域对应起来；
 
-    subgraph 模态内建模
-        I_atten["图像自注意力 Inherent_relation [B, 512, 16]"]
-        P_atten["点云自注意力 Inherent_relation [B, 512, 64]"]
-    end
-
-    subgraph 联合输出
-        joint_patch["拼接特征 cat(P_, I_) [B, 64+16, 512]"]
-        F_j["联合特征 Joint Attention [B, 64+16, 512]"]
-    end
-
-    %% 数据流连接
-    输入特征 --> 特征投影
-    F_i --> F_i_flat
-    F_i_flat --> to_common --> I
-    F_p --> to_common --> P
-
-    特征投影 --> 跨模态交互
-    I --> phi
-    P --> phi
-
-    跨模态交互 --> 特征增强
-    phi_p --> I_enhance
-    phi_i --> P_enhance
-
-    特征增强 --> 模态内建模
-    I_enhance --> I_atten
-    P_enhance --> P_atten
-
-    模态内建模 --> 联合输出
-    I_atten --> joint_patch
-    P_atten --> joint_patch
-    joint_patch --> F_j
-```
-
-to_common 是一个跨模态特征投影模块，其核心目标是将来自不同模态（图像和点云）的特征映射到一个统一的公共特征空间，从而消除模态间的分布差异，为后续的跨模态交互提供基础。
-
-关键功能：
-
-- 非线性变换：通过MLP（多层感知机）对输入特征进行非线性映射。
-
-- 特征融合准备：将异构特征（图像网格特征 vs 点云无序特征）转换为同构表示，便于计算相似度。
-
-- 筛选关键信息：通过瓶颈结构（先升维后降维）过滤噪声，保留跨模态共享的显著特征。
+4. 这样，模型就能理解“图像里交互的这部分 → 点云里对应的这部分结构”，为后续 3D affordance grounding 提供支撑。
 
 ```python
 class Joint_Region_Alignment(nn.Module):
