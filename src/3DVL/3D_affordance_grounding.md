@@ -109,6 +109,29 @@ author:
 
 2. dataset available
 
+### [LMAffordance3D (CVPR 2025)](https://arxiv.org/abs/2504.04744)
+
+特点:
+
+1. Combine language instructions, visual observations, and interaction information to locate the affordance of manipulable objects in 3D space.
+
+2. AGPIL（Affordance Grounding dataset with Points, Images and Language instructions）
+
+> This dataset includes estimations of object affordances observed from full-view, partial-view, and rotated perspectives, taking into account factors such as real-world observation angles, object rotation, and spatial occlusion (遮挡).
+
+![](affordance_grounding复盘/5.png)
+
+损失函数:
+
+1. focal loss
+
+2. dice loss
+
+
+现状:
+
+1. The code and data are closed-source
+
 ## 3D Gaussian Splatting (3DGS)
 
 ### [GEAL (CVPR 2025)](https://arxiv.org/abs/2412.09511)
