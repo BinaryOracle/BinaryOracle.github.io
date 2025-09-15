@@ -42,6 +42,21 @@ author:
 
 2. dataset available
 
+### [SeqAfford (CVPR 2025)](https://arxiv.org/abs/2412.01550)
+
+特点:
+
+![](affordance_grounding复盘/4.png)
+
+损失函数:
+
+现状:
+
+1. code available
+
+2. dataset available
+
+
 ## 点云 + 图像
 
 ## 点云 + 文本 + 图像
@@ -105,4 +120,15 @@ author:
 1. wait for code release
 
 2. wait for dataset release
+
+### [3DAffordSplat (Arxiv 2025.04)](https://arxiv.org/abs/2504.11218)
+
+### [IAAO (CVPR 2025)](https://arxiv.org/abs/2504.06827)
+
+
+## idea
+
+Momentum Encoder 生成伪标签应对噪声问题，实现更加稳健的学习 ？(参考: MoCo , ALBEF , DINO)
+
+
 
