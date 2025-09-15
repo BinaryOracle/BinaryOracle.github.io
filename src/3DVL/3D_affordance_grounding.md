@@ -46,9 +46,23 @@ author:
 
 特点:
 
+1. Propose a 3D multimodal large language model (referring to the LLaVA model architecture)
+
+2. Feed the `<SEG>` segmentation tokens output by the 3D MMLLM into the multi-granularity language-point cloud combination module to complete 3D dense prediction
+
+3. Support sequential instruction execution
+
+4. Large-scale instruction-point cloud pair dataset: A dataset with 180,000 instruction-point cloud pairs, covering single and sequential operability reasoning tasks
+
 ![](affordance_grounding复盘/4.png)
 
 损失函数:
+
+1. Autoregressive Cross-Entropy Loss
+
+2. Dice Loss
+
+3. Binary Cross-Entropy Loss
 
 现状:
 
