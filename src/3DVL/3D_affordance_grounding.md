@@ -130,7 +130,9 @@ author:
 
 现状:
 
-1. The code and data are closed-source
+1. wait for code release
+
+2. dataset available
 
 ## 3D Gaussian Splatting (3DGS)
 
