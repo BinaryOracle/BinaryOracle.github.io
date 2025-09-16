@@ -211,7 +211,7 @@ author:
 
 ## idea
 
-Momentum Encoder 生成伪标签应对噪声问题，实现更加稳健的学习 ？(参考: MoCo , ALBEF , DINO)
+Momentum Encoder 生成伪标签应对噪声问题，实现更加稳健的学习 ？(参考: MoCo , ALBEF , DINO) --> 更大的数据集，包含更多噪声
 
 语言，图像，点云 统一化输入到 多模态大模型中 ？ --》 参考 VLMo or BEiT ？
 
