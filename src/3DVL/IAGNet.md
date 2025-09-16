@@ -819,52 +819,84 @@ $$
 
 ```python
 def kl_div(p_out, q_out, get_softmax=True):
-    KLD = nn.KLDivLoss(reduction='batchmean')
-    B = p_out.size(0)
+    """
+    计算 KL 散度，用于对齐两个分布（常用于跨模态特征对齐）
+    参数:
+        p_out: 第一个特征分布 (batch_size, *)
+        q_out: 第二个特征分布 (batch_size, *)
+        get_softmax: 是否对输入进行 softmax/log_softmax 归一化
+    """
+    KLD = nn.KLDivLoss(reduction='batchmean')  # KL 散度损失函数，batch 内取平均
+    B = p_out.size(0)  # batch size
 
     if get_softmax:
-        p_out = F.softmax(p_out.view(B,-1),dim=-1)
-        q_out = F.log_softmax(q_out.view(B,-1),dim=-1)
+        # p_out 转为概率分布，q_out 转为 log 概率分布
+        p_out = F.softmax(p_out.view(B, -1), dim=-1)
+        q_out = F.log_softmax(q_out.view(B, -1), dim=-1)
 
+    # KL 散度：KL(q || p)，表示 q_out 相对于 p_out 的差异
     kl_loss = KLD(q_out, p_out)
 
     return kl_loss
 
+
 class HM_Loss(nn.Module):
+    """
+    Heatmap Loss: 结合了 Focal Loss + Dice Loss
+    用于逐点的 affordance 掩码预测
+    """
     def __init__(self):
         super(HM_Loss, self).__init__()
-        self.gamma = 2
-        self.alpha = 0.25
+        self.gamma = 2        # Focal loss 的聚焦参数
+        self.alpha = 0.25     # Focal loss 的平衡因子
 
     def forward(self, pred, target):
-        #[B, N, 18]
-        temp1 = -(1-self.alpha)*torch.mul(pred**self.gamma,
-                           torch.mul(1-target, torch.log(1-pred+1e-6)))
-        temp2 = -self.alpha*torch.mul((1-pred)**self.gamma,
-                           torch.mul(target, torch.log(pred+1e-6)))
-        temp = temp1+temp2
-        CELoss = torch.sum(torch.mean(temp, (0, 1)))
+        """
+        参数:
+            pred: 预测值 [B, N, C]，C = affordance 类别数
+            target: 真实标签 [B, N, C]
+        """
+        # -------- Focal Loss 部分 --------
+        # 负类损失
+        temp1 = -(1 - self.alpha) * torch.mul(
+            pred ** self.gamma,
+            torch.mul(1 - target, torch.log(1 - pred + 1e-6))
+        )
+        # 正类损失
+        temp2 = -self.alpha * torch.mul(
+            (1 - pred) ** self.gamma,
+            torch.mul(target, torch.log(pred + 1e-6))
+        )
+        # 加和得到交叉熵损失 (逐点平均)
+        temp = temp1 + temp2
+        CELoss = torch.sum(torch.mean(temp, (0, 1)))  # 对 B 和 N 维取平均，再对类别求和
 
-        intersection_positive = torch.sum(pred*target, 1)
-        cardinality_positive = torch.sum(torch.abs(pred)+torch.abs(target), 1)
-        dice_positive = (intersection_positive+1e-6) / \
-            (cardinality_positive+1e-6)
+        # -------- Dice Loss 部分 --------
+        # 正类 Dice 系数
+        intersection_positive = torch.sum(pred * target, 1)
+        cardinality_positive = torch.sum(torch.abs(pred) + torch.abs(target), 1)
+        dice_positive = (intersection_positive + 1e-6) / (cardinality_positive + 1e-6)
 
-        intersection_negative = torch.sum((1.-pred)*(1.-target), 1)
-        cardinality_negative = torch.sum(
-            2-torch.abs(pred)-torch.abs(target), 1)
-        dice_negative = (intersection_negative+1e-6) / \
-            (cardinality_negative+1e-6)
-        temp3 = torch.mean(1.5-dice_positive-dice_negative, 0)
+        # 负类 Dice 系数
+        intersection_negative = torch.sum((1. - pred) * (1. - target), 1)
+        cardinality_negative = torch.sum(2 - torch.abs(pred) - torch.abs(target), 1)
+        dice_negative = (intersection_negative + 1e-6) / (cardinality_negative + 1e-6)
 
+        # Dice 损失（同时考虑正类与负类）
+        temp3 = torch.mean(1.5 - dice_positive - dice_negative, 0)
         DICELoss = torch.sum(temp3)
-        return CELoss+1.0*DICELoss
+
+        # 返回 Focal + Dice 总和
+        return CELoss + 1.0 * DICELoss
+
 
 class CrossModalCenterLoss(nn.Module):
-    """Center loss.    
+    """
+    跨模态 Center Loss
+    约束同一类别在特征空间中的中心，使得特征分布更紧凑
     Args:
-        num_classes (int): number of classes.
-        feat_dim (int): feature dimension.
+        num_classes (int): 类别数
+        feat_dim (int): 特征维度
     """
     def __init__(self, num_classes, feat_dim=512, local_rank=None):
         super(CrossModalCenterLoss, self).__init__()
@@ -872,29 +904,40 @@ class CrossModalCenterLoss(nn.Module):
         self.feat_dim = feat_dim
         self.local_rank = local_rank
 
+        # 选择运行设备
         if self.local_rank != None:
             self.device = torch.device('cuda', self.local_rank)
         else:
             self.device = torch.device('cuda:0')
+
+        # 为每个类别定义一个可学习的中心向量 [num_classes, feat_dim]
         self.centers = nn.Parameter(torch.randn(self.num_classes, self.feat_dim).to(self.device))
 
     def forward(self, x, labels):
         """
-        Args:
-            x: feature matrix with shape (batch_size, feat_dim).
-            labels: ground truth labels with shape (batch_size).
+        参数:
+            x: 特征向量 [B, feat_dim]
+            labels: 标签 [B]
+        返回:
+            loss: 当前 batch 的 Center Loss
         """
         batch_size = x.size(0)
+
+        # 计算特征与中心之间的欧氏距离矩阵 distmat [B, num_classes]
         distmat = torch.pow(x, 2).sum(dim=1, keepdim=True).expand(batch_size, self.num_classes) + \
                   torch.pow(self.centers, 2).sum(dim=1, keepdim=True).expand(self.num_classes, batch_size).t()
-        temp = torch.mm(x, self.centers.t())
-        distmat = distmat - 2*temp
+        temp = torch.mm(x, self.centers.t())  # 内积部分
+        distmat = distmat - 2 * temp
 
-        classes = torch.arange(self.num_classes).long()
-        classes = classes.to(self.device)
+        # 构造 mask，选出每个样本对应类别的中心
+        classes = torch.arange(self.num_classes).long().to(self.device)
         labels = labels.unsqueeze(1).expand(batch_size, self.num_classes)
         mask = labels.eq(classes.expand(batch_size, self.num_classes))
+
+        # 只保留与真实类别对应的中心的距离
         dist = distmat * mask.float()
+
+        # 损失：该 batch 中每个样本与其对应中心的平均距离
         loss = dist.clamp(min=1e-12, max=1e+12).sum() / batch_size
 
         return loss

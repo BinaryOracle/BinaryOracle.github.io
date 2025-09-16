@@ -70,6 +70,25 @@ author:
 
 2. dataset available
 
+### [LASO (CVPR 2024)](https://openaccess.thecvf.com/content/CVPR2024/papers/Li_LASO_Language-guided_Affordance_Segmentation_on_3D_Object_CVPR_2024_paper.pdf)
+
+> 需要二次回顾思考
+
+特点:
+
+1. PointRefer : The Adaptive Fusion Module is responsible for injecting semantic information at multiple scales. The Referred Point Decoder will introduce a set of affordance queries to interact with the point cloud features and complete the generation of dynamic convolution kernels.
+
+2. LASO Dataset : 19,751 question-point affordance pairs
+
+![](affordance_grounding复盘/7.png)
+
+损失函数:
+
+1. Focal Loss + Dice Loss
+
+现状:
+
+1. code and dataset available
 
 ## 点云 + 图像
 
@@ -77,12 +96,25 @@ author:
 
 特点:
 
+1. Learn from 2D interactive images and generalize to 3D point clouds to infer affordance regions
 
+> Joint_Region_Alignment(JRA), Affordance_Revealed_Module(ARM), Alignment of feature distributions between image and point cloud regions (KL Loss), Local + Global Prediction
+
+2. Propose the PIAD dataset: It comprises 7012 point clouds and 5162 images, spanning 23 object classes and 17 affordance categories.
+
+![](affordance_grounding复盘/6.png)
 
 损失函数:
 
+1. Heatmap Loss (HM_Loss): Point-wise 3D affordance mask prediction = Focal Loss + Dice Loss
+
+2. Cross-Entropy Loss (CE Loss): Global affordance classification
+
+3. KL-Divergence Loss (KL Loss): Make the feature distributions of the interaction regions on the image side close to those on the point cloud side
 
 现状:
+
+1. code and dataset available
 
 
 ## 点云 + 文本 + 图像
@@ -180,6 +212,8 @@ author:
 ## idea
 
 Momentum Encoder 生成伪标签应对噪声问题，实现更加稳健的学习 ？(参考: MoCo , ALBEF , DINO)
+
+语言，图像，点云 统一化输入到 多模态大模型中 ？ --》 参考 VLMo or BEiT ？
 
 
 
