@@ -762,3 +762,165 @@ def mixup_data(x, y, alpha=1.0, device='cuda'):
 def mixup_criterion(pred, y_a, y_b, lam):
     return lam * F.nll_loss(pred, y_a) + (1 - lam) * F.nll_loss(pred, y_b)
 ```
+
+### 动态硬自举 + MixUp增强
+
+```python
+def mixup_data_Boot(x, y, alpha=1.0, device='cuda'):
+    '''Returns mixed inputs, pairs of targets, and lambda'''
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+
+    batch_size = x.size()[0]
+    if device=='cuda':
+        index = torch.randperm(batch_size).to(device)
+    else:
+        index = torch.randperm(batch_size)
+
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    # 此代码上面已经给出过注释，不过用于自举的时候需要多返回index
+    return mixed_x, y_a, y_b, lam, index
+```
+
+```python
+def train_mixUp_HardBootBeta(args, model, device, train_loader, optimizer, epoch, alpha, bmm_model, 
+                             bmm_model_maxLoss, bmm_model_minLoss, reg_term, num_classes):
+    """
+    基于 Mixup + Hard Bootstrapping + Beta 混合模型动态权重的训练函数
+
+    参数:
+    - args: 配置参数，包括 batch_size、log_interval 等
+    - model: 待训练的神经网络模型
+    - device: 训练设备 (cuda / cpu)
+    - train_loader: 训练数据加载器
+    - optimizer: 优化器
+    - epoch: 当前训练轮次
+    - alpha: Mixup Beta 分布参数
+    - bmm_model: Beta 混合模型对象，用于计算噪声权重
+    - bmm_model_maxLoss: 训练集最大损失，用于归一化
+    - bmm_model_minLoss: 训练集最小损失，用于归一化
+    - reg_term: 正则化系数
+    - num_classes: 类别数量
+    """
+
+    model.train()  # 设置模型为训练模式
+    loss_per_batch = []  # 用于保存每个 batch 的损失
+    acc_train_per_batch = []  # 用于保存每个 batch 的训练精度
+    correct = 0  # 用于累计正确预测样本数
+
+    # 遍历训练集每个 batch
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(device), target.to(device)
+        optimizer.zero_grad()  # 清空梯度
+
+        # 1. 对当前 batch 做一次前向传播，获取原始输出
+        output_x1 = model(data)
+        output_x1.detach_()  # 不计算梯度
+        optimizer.zero_grad()
+
+        # 2. Mixup 数据增强，返回混合输入、两组标签、Mixup 系数 lam、索引
+        inputs_mixed, targets_1, targets_2, lam, index = mixup_data_Boot(data, target, alpha, device)
+
+        # 对混合样本进行前向传播
+        output = model(inputs_mixed)
+        output_mean = F.softmax(output, dim=1)  # 转为概率
+        tab_mean_class = torch.mean(output_mean, -2)  # 计算每个类别在 batch 中的平均概率
+        output = F.log_softmax(output, dim=1)  # 转为 log 概率，用于 NLL loss
+
+        # 3. 使用 Beta 混合模型计算每个样本属于噪声分布的概率 B
+        B = compute_probabilities_batch(data, target, model, bmm_model, bmm_model_maxLoss, bmm_model_minLoss)
+        B = B.to(device)
+        B[B <= 1e-4] = 1e-4  # 避免 B 太小
+        B[B >= 1 - 1e-4] = 1 - 1e-4  # 避免 B 太大
+
+        # 4. 准备 Hard Bootstrapping 相关变量
+        output_x1 = F.log_softmax(output_x1, dim=1)
+        output_x2 = output_x1[index, :]  # 对应 Mixup 中第二组样本
+        B2 = B[index]  # 第二组样本的权重
+
+        z1 = torch.max(output_x1, dim=1)[1]  # 第一组样本预测类别索引
+        z2 = torch.max(output_x2, dim=1)[1]  # 第二组样本预测类别索引
+
+        # 5. 计算每个样本的 Hard Bootstrapping 损失
+        # 第一组真实标签损失
+        loss_x1_vec = (1 - B) * F.nll_loss(output, targets_1, reduction='none')
+        loss_x1 = torch.sum(loss_x1_vec) / len(loss_x1_vec)
+
+        # 第一组预测类别损失（噪声主导）
+        loss_x1_pred_vec = B * F.nll_loss(output, z1, reduction='none')
+        loss_x1_pred = torch.sum(loss_x1_pred_vec) / len(loss_x1_pred_vec)
+
+        # 第二组真实标签损失
+        loss_x2_vec = (1 - B2) * F.nll_loss(output, targets_2, reduction='none')
+        loss_x2 = torch.sum(loss_x2_vec) / len(loss_x2_vec)
+
+        # 第二组预测类别损失（噪声主导）
+        loss_x2_pred_vec = B2 * F.nll_loss(output, z2, reduction='none')
+        loss_x2_pred = torch.sum(loss_x2_pred_vec) / len(loss_x2_pred_vec)
+
+        # 6. 根据 Mixup 系数 lam 加权组合两组损失
+        loss = lam*(loss_x1 + loss_x1_pred) + (1-lam)*(loss_x2 + loss_x2_pred)
+
+        # 7. 类别概率均匀性正则化
+        loss_reg = reg_loss_class(tab_mean_class, num_classes)
+        loss = loss + reg_term * loss_reg
+
+        # 8. 反向传播与参数更新
+        loss.backward()
+        optimizer.step()
+
+        # 9. 监控每个 batch 的损失
+        loss_per_batch.append(loss.item())
+
+        # 10. 保存训练精度
+        pred = output.max(1, keepdim=True)[1]  # 预测类别索引
+        correct += pred.eq(target.view_as(pred)).sum().item()
+        acc_train_per_batch.append(100. * correct / ((batch_idx+1)*args.batch_size))
+
+        # 11. 打印训练日志
+        if batch_idx % args.log_interval == 0:
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}, Accuracy: {:.0f}%, Learning rate: {:.6f}'.format(
+                epoch, batch_idx * len(data), len(train_loader.dataset),
+                100. * batch_idx / len(train_loader), loss.item(),
+                100. * correct / ((batch_idx + 1) * args.batch_size),
+                optimizer.param_groups[0]['lr']))
+
+    # 12. 计算 epoch 平均损失和精度
+    loss_per_epoch = [np.average(loss_per_batch)]
+    acc_train_per_epoch = [np.average(acc_train_per_batch)]
+
+    return (loss_per_epoch, acc_train_per_epoch)
+```
+
+```python
+def compute_probabilities_batch(data, target, cnn_model, bmm_model, bmm_model_maxLoss, bmm_model_minLoss):
+    cnn_model.eval()
+    outputs = cnn_model(data)
+    outputs = F.log_softmax(outputs, dim=1)
+    batch_losses = F.nll_loss(outputs.float(), target, reduction = 'none')
+    batch_losses.detach_()
+    outputs.detach_()
+    cnn_model.train()
+    # 损失归一化，异常值边界化
+    batch_losses = (batch_losses - bmm_model_minLoss) / (bmm_model_maxLoss - bmm_model_minLoss + 1e-6)
+    batch_losses[batch_losses >= 1] = 1-10e-4
+    batch_losses[batch_losses <= 0] = 10e-4
+
+    #B = bmm_model.posterior(batch_losses,1)
+    # 查表快速得到每个样本损失属于beta2分布的概率(估算)
+    B = bmm_model.look_lookup(batch_losses, bmm_model_maxLoss, bmm_model_minLoss)
+
+    return torch.FloatTensor(B)
+```
+
+```python
+# KL 散度
+def reg_loss_class(mean_tab,num_classes=10):
+    loss = 0
+    for items in mean_tab:
+        loss += (1./num_classes)*torch.log((1./num_classes)/items)
+    return loss
+```
