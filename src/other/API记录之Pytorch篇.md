@@ -763,3 +763,61 @@ print(torch.all(y == z)) # 输出: True，数据值相同
 | `tensor.contiguous()` | **确保**返回一个连续的张量 | **条件性复制**（仅在原张量不连续时复制） |
 
 **最佳实践**：当你对一个张量进行了 `transpose`, `permute` 等可能改变内存布局的操作后，如果后续需要用到 `view` 或者要将其传入某些特定函数，**安全起见，先调用 `.contiguous()`**。虽然有时不调用也能工作，但显式地调用可以避免难以调试的运行时错误。
+
+### `F.nll_loss` 或 `F.cross_entropy` 的 `reduction` 参数
+
+> cross_entropy = log_softmax + nll_loss
+
+* 对于 `F.nll_loss` 或 `F.cross_entropy`，默认 `reduction='mean'`
+
+  * 会对 batch 内所有样本的损失 **取平均**
+  
+  * 输出是一个标量
+
+* 如果设置 `reduction='sum'`
+
+  * 会对 batch 内所有样本的损失 **求和**
+
+  * 输出也是一个标量
+
+```python
+import torch
+import torch.nn.functional as F
+
+# 假设 batch 有 4 个样本，属于 3 个类别
+logits = torch.tensor([[2.0, 0.5, 1.0],
+                       [0.1, 1.2, 0.3],
+                       [1.0, 0.5, 2.0],
+                       [0.2, 0.1, 0.7]])  # shape [4,3]
+
+# 对应的真实标签
+targets = torch.tensor([0, 1, 2, 2])  # shape [4]
+
+# 先对 logits 做 log_softmax
+log_probs = F.log_softmax(logits, dim=1)
+
+# default
+loss_none = F.nll_loss(log_probs, targets)
+print("default:", loss_none)
+
+# reduction='none'
+loss_none = F.nll_loss(log_probs, targets, reduction='none')
+print("reduction='none':", loss_none)
+
+# reduction='mean'
+loss_mean = F.nll_loss(log_probs, targets, reduction='mean')
+print("reduction='mean':", loss_mean)
+
+# reduction='sum'
+loss_sum = F.nll_loss(log_probs, targets, reduction='sum')
+print("reduction='sum':", loss_sum)
+```
+
+输出:
+
+```python
+default: tensor(0.5626)
+reduction='none': tensor([0.4644, 0.5536, 0.4644, 0.7679])
+reduction='mean': tensor(0.5626)
+reduction='sum': tensor(2.2503)
+```

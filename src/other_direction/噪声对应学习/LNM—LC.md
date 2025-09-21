@@ -261,6 +261,88 @@ $$
 
 * 用于估计分布的损失始终是 **标准交叉熵损失**，在每个 epoch 后对所有样本重新计算。这与训练损失可能不同，因为训练时会引入噪声修正项。
 
+### 2. 用于标签修正的噪声模型总结
+
+在存在标签噪声的情况下，选择合适的损失函数对学习过程非常关键。标准的分类交叉熵损失（见公式 (1)）并不适合，因为它会让模型去拟合噪声标签（Zhang 等，2017）。
+
+Reed 等（2015）提出了 **静态硬自举损失（static hard bootstrapping）**。这种方法在标准交叉熵中加入了一个感知项，用来修正训练目标。其定义为：
+
+$$
+B = -\sum_{i=1}^N \Big( (1 - w_i) y_i + w_i z_i \Big)^T \log(h_i)
+$$
+
+其中，$w_i$ 控制模型预测 $z_i$ 在损失中的权重。Reed 等人设定 $w_i = 0.2, \forall i$。在这种情况下，样本的真实标签 $y_i$ 占主要部分，但模型预测 $z_i$ 也会有一定影响。
+
+他们还提出了 **静态软自举损失（static soft bootstrapping）**，将预测的 softmax 概率 $h_i$ 代替 $z_i$，并固定 $w_i = 0.05, \forall i$。这意味着更多依赖标签 $y_i$，但依然引入了一点模型预测的作用。
+
+然而，固定权重的方式存在两个问题（如第 4.2 小节表 1 所示）：
+
+* 它不能阻止模型去拟合噪声样本。
+
+* 当 $w_i$ 过小且固定时，对潜在噪声标签 $y_i$ 的修正能力受到限制。
+
+---
+
+为了解决这些问题，本文提出了 **动态硬自举** 和 **动态软自举** 方法。它们的关键是使用噪声模型对每个样本单独加权，即动态地设定 $w_i = p(k = 1 \mid \ell_i)$，其中 $\ell_i$ 是样本的交叉熵损失。BMM（Beta Mixture Model）会在每个训练轮次后基于 $\ell_i$ 进行重新估计。
+
+这样一来：
+
+* 对于干净样本，$1 - w_i$ 较大，因此损失主要依赖真实标签 $y_i$。
+
+* 对于噪声样本，$w_i$ 较大，因此损失主要由类别预测 $z_i$ 或概率预测 $h_i$ 主导，分别对应动态硬自举与动态软自举。
+
+> $z_i$ 是 $one hot$ 标签，而 $h_i$ 是 $softmax$ 输出的概率分布。
+
+在训练后期，CNN 模型能够更好地估计噪声样本的真实类别，因此这种方法更有效。第 4.2 小节的实验表明：**动态自举在效果上明显优于静态自举**。
+
+### 3. 联合标签修正与 mixup 数据增强
+
+**mixup 数据增强方法**（Zhang 等，2018）通过对样本对 $(x_p, x_q)$ 和标签对 $(y_p, y_q)$ 做凸组合来训练网络：
+
+$$
+x = \delta x_p + (1 - \delta) x_q, \quad
+\ell = \delta \ell_p + (1 - \delta) \ell_q
+$$
+
+其中 $\delta$ 从 Beta 分布 $Be(\alpha, \beta)$ 中采样。处理标签噪声时，通常将 $\alpha = \beta$ 设置较大，使 $\delta$ 接近 0.5。这样网络在训练样本之间保持线性行为，减少远离训练样本区域的输出波动。mixup 还能结合干净样本与噪声样本，计算更具代表性的损失，即使组合的是两个噪声样本，计算的损失也可能有用，因为其中一个样本可能偶然包含另一个样本的真实标签。mixup 有助于模型学习有结构的数据，同时抑制无结构噪声的影响。
+
+---
+
+为了进一步提高鲁棒性，本文提出将 **mixup 与动态自举（dynamic bootstrapping）结合**，实现针对每个样本的损失修正：
+
+$$
+\ell^* = -\delta \Big[ ((1 - w_p) y_p + w_p z_p)^T \log(h) \Big] - (1 - \delta) \Big[ ((1 - w_q) y_q + w_q z_q)^T \log(h) \Big]
+$$
+
+* $\ell^*$ 为硬自举版本，软自举版本通过将 $z_p$ 和 $z_q$ 替换为 $h_p$ 和 $h_q$ 定义。
+
+* 权重 $w_p$ 和 $w_q$ 由无监督噪声模型推断得到：
+
+$$
+w_p = p(k = 1 \mid \ell_p), \quad w_q = p(k = 1 \mid \ell_q)
+$$
+
+* 为了获取 $h_p, z_p, h_q, z_q$，需要额外前向传播，因为混合后的概率 $h$ 无法直接得到样本 $p$ 和 $q$ 的预测。
+
+该方法利用 mixup 的优势，同时通过动态自举对标签进行修正。在训练过程中，随着预测逐步改进，$\ell^*$ 有助于模型学习更好结果。然而，在高噪声水平下，网络预测不可靠，动态自举可能不收敛，因为大多数样本在自举损失中被网络预测主导，这可能导致网络倾向预测同一类别以最小化损失。
+
+> 如果大多数样本的损失都被网络预测主导，模型会发现一个“捷径”——总是预测同一个类别可以让损失最小。
+
+---
+
+为解决高噪声问题，本文引入 Tanaka 等（2018）提出的正则项，防止模型将所有样本分配到同一类别：
+
+$$
+R = \sum_{c=1}^C p_c \log \left( \frac{p_c}{h_c} \right)
+$$
+
+* $p_c$ 为类别 $c$ 的先验概率（假设均匀分布 $p_c = 1/C$）
+
+* $h_c$ 为模型在整个数据集上类别 $c$ 的平均 softmax 概率（通过 mini-batch 近似计算）
+
+最终将正则项加权系数 $\eta$ 加入 $\ell^*$ 中（公式 (13)），在实验中 $\eta=1$。第 4.3 小节展示了该方法效果，第 4.5 小节表明其性能优于现有最先进方法。
+
+> **KL散度约束:** 惩罚模型把所有样本预测成同一类别的行为; 鼓励模型输出 各类别概率尽量接近均匀分布; 在高噪声情况下，避免动态自举引导模型陷入“单一类别捷径”。
 
 ## 代码实现
 
@@ -454,3 +536,229 @@ def fit_beta_weighted(x, w):
 完整的EM算法执行过程如下图所示:
 
 ![](LNM-LC/3.png)
+
+### 标签噪声建模
+
+```python
+def track_training_loss(args, model, device, train_loader, epoch, bmm_model1, bmm_model_maxLoss1, bmm_model_minLoss1):
+    '''
+    跟踪训练集上的每个样本损失，并拟合 Beta 混合模型（BMM）用于噪声样本检测。
+    
+    输入:
+    - args: 一些训练参数（未在函数内部使用）
+    - model: 当前训练的神经网络模型
+    - device: 'cuda' 或 'cpu'
+    - train_loader: 训练数据加载器
+    - epoch: 当前训练轮数
+    - bmm_model1, bmm_model_maxLoss1, bmm_model_minLoss1: 之前轮次的 BMM 模型及最大/最小损失
+    
+    输出:
+    - all_losses: 每个样本的 NLL 损失
+    - all_probs: 每个样本的 log_softmax 概率
+    - all_argmaxXentropy: 基于预测类别的交叉熵损失
+    - bmm_model: 拟合当前 epoch 的 Beta 混合模型
+    - bmm_model_maxLoss: 当前 epoch 的最大损失值（用于归一化）
+    - bmm_model_minLoss: 当前 epoch 的最小损失值（用于归一化）
+    '''
+    
+    # 设置模型为评估模式，不计算梯度
+    model.eval()
+
+    # 用于存储全量样本信息
+    all_losses = torch.Tensor()
+    all_predictions = torch.Tensor()
+    all_probs = torch.Tensor()
+    all_argmaxXentropy = torch.Tensor()
+
+    # 遍历训练集 batch
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(device), target.to(device)
+        prediction = model(data)  # 前向预测
+
+        # 1. 对预测值做 log_softmax
+        prediction = F.log_softmax(prediction, dim=1)
+
+        # 2. 计算每个样本的负对数似然损失（NLL）
+        idx_loss = F.nll_loss(prediction, target, reduction='none')
+        idx_loss.detach_()  # 不计算梯度
+        all_losses = torch.cat((all_losses, idx_loss.cpu()))  # 收集到全量损失
+
+        # 3. 保存概率信息
+        probs = prediction.clone()
+        probs.detach_()
+        all_probs = torch.cat((all_probs, probs.cpu()))
+
+        # 4. 基于预测类别的交叉熵
+        arg_entr = torch.max(prediction, dim=1)[1]  # 取预测最大值类别索引
+        arg_entr = F.nll_loss(prediction.float(), arg_entr.to(device), reduction='none')
+        arg_entr.detach_()
+        all_argmaxXentropy = torch.cat((all_argmaxXentropy, arg_entr.cpu()))
+
+    # 将全量损失转换为 numpy 数组
+    loss_tr = all_losses.data.numpy()
+
+    # -------------------------------
+    # 异常值检测（去除极端高低损失）
+    # -------------------------------
+    max_perc = np.percentile(loss_tr, 95)  # 上 95% 分位数
+    min_perc = np.percentile(loss_tr, 5)   # 下 5% 分位数
+    loss_tr = loss_tr[(loss_tr <= max_perc) & (loss_tr >= min_perc)]  # 去掉极端值
+
+    # 将最大最小值保存为 Tensor，用于后续归一化
+    bmm_model_maxLoss = torch.FloatTensor([max_perc]).to(device)
+    bmm_model_minLoss = torch.FloatTensor([min_perc]).to(device) + 1e-5  # 避免除零
+
+    # -------------------------------
+    # 损失归一化到 (0,1) 区间
+    # -------------------------------
+    loss_tr = (loss_tr - bmm_model_minLoss.data.cpu().numpy()) / \
+              (bmm_model_maxLoss.data.cpu().numpy() - bmm_model_minLoss.data.cpu().numpy() + 1e-6)
+
+    # 防止越界
+    loss_tr[loss_tr >= 1] = 1 - 1e-4
+    loss_tr[loss_tr <= 0] = 1e-4
+
+    # -------------------------------
+    # 拟合 Beta 混合模型 (BMM)
+    # -------------------------------
+    bmm_model = BetaMixture1D(max_iters=10)
+    bmm_model.fit(loss_tr)        # 使用归一化后的损失拟合
+    bmm_model.create_lookup(1)    # 创建查找表，用于快速估计后验概率 --- 对同一个样本来说，其属于干净样本分布的概率和属于噪声样本分布的概率之和为1
+
+    # 返回全量损失、概率、基于预测类别的损失，以及拟合的 BMM 和最大最小损失
+    return all_losses.data.numpy(), \
+           all_probs.data.numpy(), \
+           all_argmaxXentropy.numpy(), \
+           bmm_model, bmm_model_maxLoss, bmm_model_minLoss
+```
+
+```python
+def probability(self, x):
+    '''
+    计算给定样本 x 的混合概率密度
+    
+    输入:
+    - x: 样本，可以是单个值或数组
+    
+    输出:
+    - 样本在混合 Beta 分布下的总概率密度
+    '''
+    # 对每个 Beta 分布分量，计算加权似然，然后求和
+    return sum(self.weighted_likelihood(x, y) for y in range(2))
+
+
+def posterior(self, x, y):
+    '''
+    计算样本 x 属于第 y 个 Beta 分布分量的后验概率 P(y|x)
+    
+    输入:
+    - x: 样本
+    - y: 分量索引（0 或 1）
+    
+    输出:
+    - 后验概率 P(y|x)
+    '''
+    # 后验概率 = 加权似然 / 总概率
+    return self.weighted_likelihood(x, y) / (self.probability(x) + self.eps_nan)
+
+
+def create_lookup(self, y):
+    '''
+    为指定分量 y 创建后验概率查找表，用于快速估算样本属于该分量的概率
+    
+    输入:
+    - y: 分量索引（0 或 1）
+    '''
+    # 在 [0,1] 范围内生成均匀的点 -- 损失会被归一化到[0,1]区间中去,lookup_resolution默认为100
+    x_l = np.linspace(0+self.eps_nan, 1-self.eps_nan, self.lookup_resolution)
+    
+    # 计算每个点属于 y 分量的后验概率
+    lookup_t = self.posterior(x_l, y)
+    
+    # 将最大概率点之后的值全部置为最大值，保证查找表单调
+    lookup_t[np.argmax(lookup_t):] = lookup_t.max()
+    
+    # 保存查找表
+    self.lookup = lookup_t
+    # 保存对应的 x 值（虽然最终没使用）
+    self.lookup_loss = x_l
+
+
+def look_lookup(self, x, loss_max, loss_min):
+    '''
+    使用查找表快速估算样本的后验概率
+    
+    输入:
+    - x: 样本张量
+    - loss_max: 最大损失（用于归一化）
+    - loss_min: 最小损失（用于归一化）
+    
+    输出:
+    - 样本对应的查找表后验概率
+    '''
+    # 转为 numpy 数组
+    x_i = x.clone().cpu().numpy()
+    
+    # 映射到查找表索引
+    x_i = np.array((self.lookup_resolution * x_i).astype(int))
+    
+    # 边界处理
+    x_i[x_i < 0] = 0
+    x_i[x_i == self.lookup_resolution] = self.lookup_resolution - 1
+    
+    # 返回查找表对应的概率
+    return self.lookup[x_i]
+```
+
+### MixUp 数据增强
+
+1. 对输入数据进行 MixUp 增强
+
+```python
+def mixup_data(x, y, alpha=1.0, device='cuda'):
+    '''
+    对输入的 batch 数据进行 Mixup 数据增强
+
+    输入:
+    - x: 输入特征张量，形状 [batch_size, ...]
+    - y: 对应标签张量，形状 [batch_size, num_classes] 或 [batch_size]
+    - alpha: Beta 分布参数，用于生成混合系数 lambda
+    - device: 数据所在设备，'cuda' 或 'cpu'
+
+    输出:
+    - mixed_x: 混合后的输入特征张量
+    - y_a: 原始标签
+    - y_b: 对应被混合的另一组标签
+    - lam: 混合系数 lambda
+    '''
+    
+    # 1. 根据 alpha 参数生成混合系数 lam
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)  # 从 Beta(alpha, alpha) 分布采样
+    else:
+        lam = 1  # alpha=0 时，不做混合，相当于直接返回原样本
+
+    # 2. 获取 batch 大小
+    batch_size = x.size()[0]
+
+    # 3. 随机打乱 batch 索引，用于选择混合的另一组样本
+    if device == 'cuda':
+        index = torch.randperm(batch_size).cuda()
+    else:
+        index = torch.randperm(batch_size)
+
+    # 4. 根据 lambda 对输入特征进行线性混合
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+
+    # 5. 对应的标签也要保留两组，用于计算 Mixup 损失
+    y_a, y_b = y, y[index]
+
+    # 6. 返回混合后的输入、两组标签以及混合系数
+    return mixed_x, y_a, y_b, lam
+```
+2. 对输出 Loss 进行MixUp 增强
+
+```python
+def mixup_criterion(pred, y_a, y_b, lam):
+    return lam * F.nll_loss(pred, y_a) + (1 - lam) * F.nll_loss(pred, y_b)
+```
