@@ -260,3 +260,197 @@ $$
 * $k=0$ 表示干净样本，$k=1$ 表示噪声样本。
 
 * 用于估计分布的损失始终是 **标准交叉熵损失**，在每个 epoch 后对所有样本重新计算。这与训练损失可能不同，因为训练时会引入噪声修正项。
+
+
+## 代码实现
+
+### 期望最大化（Expectation-Maximization, EM）算法
+
+EM 是一种**处理“隐藏变量”或不完全数据”的参数估计方法**。
+
+* 问题：你有观测数据 $X = \{x_1, x_2, ..., x_N\}$，但模型中存在隐藏变量 $Z = \{z_1, ..., z_N\}$（比如样本属于哪个分量）
+
+* 目标：估计模型参数 $\theta$（例如 Beta 分布的 $\alpha, \beta$ 和混合权重 $\pi$）
+
+* 难点：直接最大化似然函数很困难，因为隐藏变量未知
+
+**EM 的核心思想：**
+
+> 交替做两件事：
+>
+> 1. **E-step**：根据当前参数估计隐藏变量的分布（“猜测每个样本属于哪个分量”）
+> 
+> 2. **M-step**：在隐藏变量已知的假设下，更新参数，使似然最大（用“责任”加权更新参数）
+>
+> EM 算法就是解决“**已知数据分布形式，但部分信息（隐藏变量）未知**”的参数估计问题。它通过 **交替猜测隐藏变量 → 根据猜测更新参数** 的方式逼近最大似然估计。
+
+论文中所提供的 `EM` 算法整体流程框架如下:
+
+```python
+def fit(self, x):
+    # 拷贝输入数据，避免修改原始数组 (输入的是每个样本的损失值)
+    x = np.copy(x)
+
+    # ----------------------------
+    # 对数据做数值修正，保证 Beta 分布计算稳定
+    # Beta 分布定义在开区间 (0, 1)，x=0 或 x=1 会导致 pdf 或矩估计出现数值不稳定
+    # eps 用来把 0/1 附近的值略微拉开
+    # ----------------------------
+    eps = 1e-4
+    x[x >= 1 - eps] = 1 - eps  # 将大于等于 1-eps 的值置为 1-eps
+    x[x <= eps] = eps          # 将小于等于 eps 的值置为 eps
+
+    # ----------------------------
+    # 开始 EM 迭代
+    # ----------------------------
+    for i in range(self.max_iters):
+        # ------------------------
+        # E-step（期望步）
+        # 计算每个样本属于每个 Beta 分量的责任
+        # r.shape = (2, N)，r[k, i] 表示第 i 个样本属于分量 k 的概率
+        # ------------------------
+        r = self.responsibilities(x)
+
+        # ------------------------
+        # M-step（最大化步）
+        # 使用责任 r 对每个分量的 Beta 分布参数进行加权拟合
+        # fit_beta_weighted 使用加权矩估计得到 alpha 和 beta
+        # ------------------------
+        self.alphas[0], self.betas[0] = fit_beta_weighted(x, r[0])  # 更新第 0 个分量
+        self.alphas[1], self.betas[1] = fit_beta_weighted(x, r[1])  # 更新第 1 个分量
+
+        # ------------------------
+        # 更新混合权重 pi_k
+        # 根据责任求每个分量的总权重，然后归一化
+        # ------------------------
+        self.weight = r.sum(axis=1)       # 每个分量的总责任
+        self.weight /= self.weight.sum()  # 归一化，使 sum(weight)=1
+
+    # 返回训练好的模型实例
+    return self
+```
+**1. E-step（期望步）: 作者使用两个混合 Beta 分布分别建模干净样本和噪声样本的损失分布。在 E 步中，首先根据当前模型参数，计算每个样本属于 Beta1（干净样本损失分布）和 Beta2（噪声样本损失分布）的后验概率（responsibility），即每个样本属于各分量的概率，这两个概率经过归一化保证和为 1。**
+
+```python
+def likelihood(self, x, y):
+    """
+    计算样本 x 在第 y 个 Beta 分量下的似然（概率密度函数值）
+    
+    参数:
+        x : array-like
+            样本数据，可以是单个值或向量
+        y : int
+            分量索引，0 表示 Beta1，1 表示 Beta2
+    
+    返回:
+        array-like
+            样本 x 在 Beta 分布 y 下的概率密度
+    """
+    return stats.beta.pdf(x, self.alphas[y], self.betas[y])
+
+
+def weighted_likelihood(self, x, y):
+    """
+    计算样本 x 在第 y 个 Beta 分量下的加权似然
+    
+    参数:
+        x : array-like
+            样本数据
+        y : int
+            分量索引
+    
+    返回:
+        array-like
+            样本 x 在 Beta 分量 y 下的加权概率密度，即 pdf * 分量权重
+    """
+    # self.weight[y] 是当前 Beta 分量的混合权重 π_y
+    return self.weight[y] * self.likelihood(x, y)
+
+
+def responsibilities(self, x):
+    """
+    E-step 的核心：计算每个样本属于各个 Beta 分量的后验概率（responsibility）
+    
+    参数:
+        x : array-like
+            样本数据
+    
+    返回:
+        r : ndarray, shape=(2, N)
+            r[k, i] 表示样本 i 属于分量 k 的概率
+    """
+    # 先计算每个样本在各个分量下的加权似然
+    # r.shape = (2, N)，每行对应一个分量，每列对应一个样本
+    r = np.array([self.weighted_likelihood(x, i) for i in range(2)])
+    
+    # 防止数值过小导致除零或 NaN
+    # 将小于 eps_nan 的概率置为 eps_nan
+    r[r <= self.eps_nan] = self.eps_nan
+    
+    # 对每个样本归一化，使两行（两个分量）概率和为 1
+    # 对应公式: r_{ik} = π_k * pdf(x_i | θ_k) / sum_j(π_j * pdf(x_i | θ_j))
+    r /= r.sum(axis=0)
+    
+    return r
+```
+
+**2. M-step（最大化步）: 利用 E 步得到的责任（作为权重），对每个分量重新估计参数。**
+
+```python
+def weighted_mean(x, w):
+    """
+    计算加权平均值
+    
+    参数:
+        x : array-like
+            样本数据
+        w : array-like
+            权重向量，对应每个样本的权重（例如 EM 算法中的责任 r）
+    
+    返回:
+        float
+            加权平均值
+    """
+    # 加权平均值公式：sum(w_i * x_i) / sum(w_i)
+    return np.sum(w * x) / np.sum(w)
+
+
+def fit_beta_weighted(x, w):
+    """
+    根据加权样本估计 Beta 分布的参数 alpha 和 beta
+    
+    参数:
+        x : array-like
+            样本数据，取值范围应在 (0, 1)
+        w : array-like
+            权重向量，用于加权估计（例如来自 E-step 的责任）
+    
+    返回:
+        (alpha, beta) : tuple of floats
+            拟合得到的 Beta 分布参数
+    """
+    # Step 1: 计算加权均值
+    x_bar = weighted_mean(x, w)  
+    
+    # Step 2: 计算加权方差
+    s2 = weighted_mean((x - x_bar)**2, w)
+    
+    # Step 3: 根据矩估计公式推导 alpha
+    # Beta 分布的均值 mu = alpha / (alpha + beta)
+    # 方差 sigma^2 = alpha*beta / ((alpha+beta)^2 * (alpha+beta+1))
+    # 通过加权均值和方差反解得到 alpha
+    alpha = x_bar * ((x_bar * (1 - x_bar)) / s2 - 1)
+    
+    # Step 4: 根据均值公式反解 beta
+    beta = alpha * (1 - x_bar) / x_bar
+    
+    # 返回估计的参数
+    return alpha, beta
+```
+> **加权平均值公式**: 在计算平均时考虑“重要性”，权重越大，样本对结果的影响越大; 对比普通求平均值，所有样本的权重都是 $1/N$。
+
+> **加权方差公式**: 加权方差考虑了样本的“重要性”，权重越大的样本，其“离均值的偏差”对整体方差的贡献更大。
+
+完整的EM算法执行过程如下图所示:
+
+![](LNM-LC/3.png)
