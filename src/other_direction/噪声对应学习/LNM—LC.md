@@ -1317,3 +1317,182 @@ def mixup_criterion_SoftHard(pred, y_a, y_b, B, index, output_x1, output_x2, Tem
 5. **返回值**：
 
    * 对整个batch的样本损失取平均。
+
+### 训练核心主流程
+
+```python
+def main():
+    # 初始化BMM模型及相关参数
+    bmm_model = bmm_model_maxLoss = bmm_model_minLoss = cont = k = 0
+
+    # bootstrap阶段标准训练结束的epoch，+1是因为条件定义为 ">" 或 "<" 而不是 ">="
+    bootstrap_ep_std = milestones[0] + 5 + 1
+    # 引导式Mixup开始的epoch
+    guidedMixup_ep = 106
+
+    # 动态Mixup情况下，bootstrap阶段的epoch
+    if args.Mixup == 'Dynamic':
+        bootstrap_ep_mixup = guidedMixup_ep + 5
+    else:
+        bootstrap_ep_mixup = milestones[0] + 5 + 1
+
+    # 用于Soft-Hard Beta的温度控制
+    countTemp = 1
+    temp_length = 200 - bootstrap_ep_mixup
+
+    # 遍历每个训练epoch
+    for epoch in range(1, args.epochs + 1):
+        # 更新学习率调度器
+        scheduler.step()
+
+        ### 标准交叉熵训练（不使用Mixup） ###
+        if args.Mixup == "None":
+            print('\t##### Doing standard training with cross-entropy loss #####')
+            loss_per_epoch, acc_train_per_epoch_i = train_CrossEntropy(args, model, device, train_loader, optimizer, epoch)
+
+        ### 静态Mixup ###
+        if args.Mixup == "Static":
+            alpha = args.alpha
+            bootstrap_ep_mixup = 0
+            # 前几个epoch进行普通Mixup训练
+            if epoch < bootstrap_ep_mixup:
+                print('\t##### Doing NORMAL mixup for {0} epochs #####'.format(bootstrap_ep_mixup - 1))
+                loss_per_epoch, acc_train_per_epoch_i = train_mixUp(args, model, device, train_loader, optimizer, epoch, 32)
+            else:
+                # 后续epoch进行Beta Bootstrapping（Hard或Soft）与普通Mixup结合训练
+                if args.BootBeta == "Hard":
+                    print("\t##### Doing HARD BETA bootstrapping and NORMAL mixup from the epoch {0} #####".format(bootstrap_ep_mixup))
+                    loss_per_epoch, acc_train_per_epoch_i = train_mixUp_HardBootBeta(
+                        args, model, device, train_loader, optimizer, epoch,
+                        alpha, bmm_model, bmm_model_maxLoss, bmm_model_minLoss,
+                        args.reg_term, num_classes
+                    )
+                elif args.BootBeta == "Soft":
+                    print("\t##### Doing SOFT BETA bootstrapping and NORMAL mixup from the epoch {0} #####".format(bootstrap_ep_mixup))
+                    loss_per_epoch, acc_train_per_epoch_i = train_mixUp_SoftBootBeta(
+                        args, model, device, train_loader, optimizer, epoch,
+                        alpha, bmm_model, bmm_model_maxLoss, bmm_model_minLoss,
+                        args.reg_term, num_classes
+                    )
+
+        ## 动态Mixup ##
+        if args.Mixup == "Dynamic":
+            alpha = args.alpha
+            # 前几个epoch进行普通Mixup训练
+            if epoch < guidedMixup_ep:
+                print('\t##### Doing NORMAL mixup for {0} epochs #####'.format(guidedMixup_ep - 1))
+                loss_per_epoch, acc_train_per_epoch_i = train_mixUp(args, model, device, train_loader, optimizer, epoch, 32)
+            # guidedMixup阶段使用Beta混合分布进行Mixup
+            elif epoch < bootstrap_ep_mixup:
+                print('\t##### Doing Dynamic mixup from epoch {0} #####'.format(guidedMixup_ep))
+                loss_per_epoch, acc_train_per_epoch_i = train_mixUp_Beta(
+                    args, model, device, train_loader, optimizer, epoch, alpha,
+                    bmm_model, bmm_model_maxLoss, bmm_model_minLoss
+                )
+            # Soft-Hard Beta与动态Mixup结合训练，并使用温度控制
+            else:
+                print("\t##### Going from SOFT BETA bootstrapping to HARD BETA with linear temperature and Dynamic mixup from the epoch {0} #####".format(bootstrap_ep_mixup))
+                loss_per_epoch, acc_train_per_epoch_i, countTemp, k = train_mixUp_SoftHardBetaDouble(
+                    args, model, device, train_loader, optimizer, epoch,
+                    bmm_model, bmm_model_maxLoss, bmm_model_minLoss,
+                    countTemp, k, temp_length, args.reg_term, num_classes
+                )
+
+        ### 跟踪训练损失和BMM模型 ###
+        epoch_losses_train, epoch_probs_train, argmaxXentropy_train, bmm_model, bmm_model_maxLoss, bmm_model_minLoss = \
+            track_training_loss(args, model, device, train_loader_track, epoch, bmm_model, bmm_model_maxLoss, bmm_model_minLoss)
+
+        # 测试阶段
+        loss_per_epoch, acc_val_per_epoch_i = test_cleaning(args, model, device, test_loader)
+```
+
+### 训练数据上添加噪声
+
+```python
+# Noise without the sample class
+def add_noise_cifar_wo(loader, noise_percentage=20):
+    """
+    给 CIFAR 训练集添加噪声标签，但新标签不能与原标签相同。
+    
+    参数:
+        loader: CIFAR 数据加载器
+        noise_percentage: 需要添加噪声的百分比（0~100）
+    
+    返回:
+        noisy_labels: 添加噪声后的标签列表
+    """
+    # 固定随机种子，保证实验可复现
+    torch.manual_seed(2)
+    np.random.seed(42)
+    
+    # 复制训练标签
+    noisy_labels = [sample_i for sample_i in loader.sampler.data_source.train_labels]
+    # 复制训练图像
+    images = [sample_i for sample_i in loader.sampler.data_source.train_data]
+    
+    # 生成每个样本是否加噪声的随机数（0~99）
+    probs_to_change = torch.randint(100, (len(noisy_labels),))
+    # 判断哪些样本需要加噪声
+    idx_to_change = probs_to_change >= (100.0 - noise_percentage)
+    # 计算实际噪声比例（仅用于信息输出）
+    percentage_of_bad_labels = 100 * (torch.sum(idx_to_change).item() / float(len(noisy_labels)))
+
+    # 对每个需要加噪声的样本进行处理
+    for n, label_i in enumerate(noisy_labels):
+        if idx_to_change[n] == 1:
+            # 构建新标签候选集合，不包含当前原标签
+            set_labels = list(set(range(10)) - set([label_i]))
+            # 随机选择一个新标签
+            set_index = np.random.randint(len(set_labels))
+            noisy_labels[n] = set_labels[set_index]
+
+    # 更新 DataLoader 中的数据和标签
+    loader.sampler.data_source.train_data = images
+    loader.sampler.data_source.train_labels = noisy_labels
+
+    return noisy_labels
+
+
+# Noise with the sample class (as in Re-thinking generalization)
+def add_noise_cifar_w(loader, noise_percentage=20):
+    """
+    给 CIFAR 训练集添加噪声标签，但新标签可以包含原标签（参考论文 "Re-thinking generalization"）。
+    
+    参数:
+        loader: CIFAR 数据加载器
+        noise_percentage: 需要添加噪声的百分比（0~100）
+    
+    返回:
+        noisy_labels: 添加噪声后的标签列表
+    """
+    # 固定随机种子，保证实验可复现
+    torch.manual_seed(2)
+    np.random.seed(42)
+    
+    # 复制训练标签
+    noisy_labels = [sample_i for sample_i in loader.sampler.data_source.train_labels]
+    # 复制训练图像
+    images = [sample_i for sample_i in loader.sampler.data_source.train_data]
+    
+    # 生成每个样本是否加噪声的随机数（0~99）
+    probs_to_change = torch.randint(100, (len(noisy_labels),))
+    # 判断哪些样本需要加噪声
+    idx_to_change = probs_to_change >= (100.0 - noise_percentage)
+    # 计算实际噪声比例（仅用于信息输出）
+    percentage_of_bad_labels = 100 * (torch.sum(idx_to_change).item() / float(len(noisy_labels)))
+
+    # 对每个需要加噪声的样本进行处理
+    for n, label_i in enumerate(noisy_labels):
+        if idx_to_change[n] == 1:
+            # 构建新标签候选集合，包含所有可能标签（包括原标签）
+            set_labels = list(set(range(10)))
+            # 随机选择一个新标签
+            set_index = np.random.randint(len(set_labels))
+            noisy_labels[n] = set_labels[set_index]
+
+    # 更新 DataLoader 中的数据和标签
+    loader.sampler.data_source.train_data = images
+    loader.sampler.data_source.train_labels = noisy_labels
+
+    return noisy_labels
+```
