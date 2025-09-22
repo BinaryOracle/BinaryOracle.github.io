@@ -924,3 +924,135 @@ def reg_loss_class(mean_tab,num_classes=10):
         loss += (1./num_classes)*torch.log((1./num_classes)/items)
     return loss
 ```
+
+### 动态软自举 + MixUp增强
+
+```python
+def train_mixUp_SoftBootBeta(args, model, device, train_loader, optimizer, epoch, alpha, bmm_model, bmm_model_maxLoss, \
+                                            bmm_model_minLoss, reg_term, num_classes):
+    """
+    训练函数：MixUp + Soft Bootstrapping + Beta Mixture Model
+    - 使用 MixUp 数据增强
+    - 使用 Soft Bootstrapping（结合模型预测分布与真实标签）
+    - 使用 BMM 模型估计样本是否为干净样本的概率 B
+    - 使用类别分布正则化防止过拟合
+    """
+
+    model.train()  # 设置为训练模式
+    loss_per_batch = []  # 记录每个 batch 的 loss
+    acc_train_per_batch = []  # 记录每个 batch 的训练集精度
+    correct = 0  # 累积正确预测的数量
+
+    # 遍历所有 batch
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(device), target.to(device)
+        optimizer.zero_grad()  # 梯度清零
+
+        # 第一次前向传播：得到原始样本的预测结果
+        output_x1 = model(data)
+        output_x1.detach_()  # 切断梯度，不参与反向传播
+        optimizer.zero_grad()
+
+        # 估计每个样本的干净概率 B
+        if epoch == 1:
+            # 第一个 epoch 没法建模，统一设置为 0.5
+            B = 0.5*torch.ones(len(target)).float().to(device)
+        else:
+            # 通过 Beta Mixture Model 估计每个样本的干净概率
+            B = compute_probabilities_batch(data, target, model, bmm_model, bmm_model_maxLoss, bmm_model_minLoss)
+            B = B.to(device)
+            # 防止数值极端情况，限制在 [1e-4, 1-1e-4] 区间内
+            B[B <= 1e-4] = 1e-4
+            B[B >= 1-1e-4] = 1-1e-4
+
+        # MixUp 数据增强：混合两个样本（输入和标签）
+        inputs_mixed, targets_1, targets_2, lam, index = mixup_data_Boot(data, target, alpha, device)
+
+        # 前向传播：得到混合样本的预测结果
+        output = model(inputs_mixed)
+        output_mean = F.softmax(output, dim=1)  # softmax 概率分布
+        output = F.log_softmax(output, dim=1)   # log-softmax 结果（供 NLLLoss 使用）
+
+        # 提取被 mixup 的第二个样本对应的预测结果
+        output_x2 = output_x1[index, :]
+
+        # 统计所有类别的平均预测概率，用于正则化
+        tab_mean_class = torch.mean(output_mean, -2)  # 按样本维度取均值
+
+        # 计算 Soft Bootstrapping 的混合损失
+        # - targets_1, targets_2: mixup 后的原始标签
+        # - output_x1, output_x2: 模型 soft label 预测结果
+        # - B: 每个样本为干净的概率
+        # - lam: mixup 权重
+        loss = mixup_criterion_mixSoft(output, targets_1, targets_2, B, lam, index, output_x1, output_x2)
+
+        # 加上类别分布正则项，避免预测过度偏向某些类别
+        loss_reg = reg_loss_class(tab_mean_class)
+        loss = loss + reg_term*loss_reg
+
+        # 反向传播 + 参数更新
+        loss.backward()
+        optimizer.step()
+
+        ################## monitor losses  ####################################
+        loss_per_batch.append(loss.item())  # 保存 batch 的损失
+        ########################################################################
+
+        # 计算 batch 的训练精度
+        pred = output.max(1, keepdim=True)[1]  # 预测类别 = 最大 log 概率对应的类别
+        correct += pred.eq(target.view_as(pred)).sum().item()  # 累积正确数量
+        acc_train_per_batch.append(100. * correct / ((batch_idx+1)*args.batch_size))
+
+        # 定期打印日志
+        if batch_idx % args.log_interval == 0:
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}, Accuracy: {:.0f}%, Learning rate: {:.6f}'.format(
+                epoch, batch_idx * len(data), len(train_loader.dataset),
+                       100. * batch_idx / len(train_loader), loss.item(),
+                       100. * correct / ((batch_idx + 1) * args.batch_size),
+                optimizer.param_groups[0]['lr']))
+
+    # 统计一个 epoch 的平均 loss 和 acc
+    loss_per_epoch = [np.average(loss_per_batch)]
+    acc_train_per_epoch = [np.average(acc_train_per_batch)]
+
+    return (loss_per_epoch, acc_train_per_epoch)
+```
+```python
+def mixup_criterion_mixSoft(pred, y_a, y_b, B, lam, index, output_x1, output_x2):
+    """
+    计算 MixUp + Soft Bootstrapping 的损失函数
+    Args:
+        pred      : log-softmax 输出 (batch_size, num_classes)
+        y_a, y_b  : mixup 的两个标签
+        B         : 每个样本为“干净样本”的概率 (batch_size,)
+        lam       : mixup 系数 (Beta 分布采样得到的混合比例)
+        index     : 打乱顺序的索引，用于取出第二组样本
+        output_x1 : 原始 batch 的模型输出 (未打乱)
+        output_x2 : 打乱后的模型输出 (对应 y_b 的样本)
+    Returns:
+        标量 loss （一个 batch 的平均损失）
+    """
+
+    return torch.sum(
+        # ----------- 第一部分：lam 权重对应的混合样本 -----------
+        (lam) * (
+            # (1 - B)：更多信任真实标签 → 使用 NLLLoss
+            (1 - B) * F.nll_loss(pred, y_a, reduction='none') +
+
+            # B：更多信任模型预测（Soft Bootstrapping）
+            #   -torch.sum(p_soft * log_pred)，即交叉熵形式
+            B * (-torch.sum(F.softmax(output_x1, dim=1) * pred, dim=1))
+        )
+        +
+        # ----------- 第二部分：(1-lam) 权重对应的另一半混合样本 -----------
+        (1 - lam) * (
+            # (1 - B[index])：信任真实标签 y_b
+            (1 - B[index]) * F.nll_loss(pred, y_b, reduction='none') +
+
+            # B[index]：信任打乱后的样本 soft label
+            B[index] * (-torch.sum(F.softmax(output_x2, dim=1) * pred, dim=1))
+        )
+    ) / len(pred)  # 对 batch 求平均
+```
+> soft label 是直接每个类别乘上其对应的软概率值，再把所有类别的概率值求和，得到当前样本的软损失。
+
