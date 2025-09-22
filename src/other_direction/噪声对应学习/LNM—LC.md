@@ -710,7 +710,7 @@ def look_lookup(self, x, loss_max, loss_min):
     return self.lookup[x_i]
 ```
 
-### MixUp 数据增强
+### 静态 MixUp 数据增强
 
 1. 对输入数据进行 MixUp 增强
 
@@ -1165,3 +1165,155 @@ def mixup_data_beta(x, y, B, device='cuda'):
 
     return mixed_x, y_a, y_b, index
 ```
+
+```python
+
+def mixup_criterion_beta(pred, y_a, y_b):
+    lam = np.random.beta(32, 32)
+    return lam * F.nll_loss(pred, y_a) + (1-lam) * F.nll_loss(pred, y_b)
+```
+
+### 动态MixUp增强 + 动态自举 + 温度调节
+
+```python
+def train_mixUp_SoftHardBetaDouble(args, model, device, train_loader, optimizer, epoch, bmm_model, \
+                                    bmm_model_maxLoss, bmm_model_minLoss, countTemp, k, temp_length, reg_term, num_classes):
+    """
+    训练函数：Dynamic MixUp + Soft/Hard Bootstrapping + Beta混合权重 + 温度调节
+    """
+    model.train()  # 设置模型为训练模式
+    loss_per_batch = []  # 用于记录每个batch的损失
+    acc_train_per_batch = []  # 用于记录每个batch的训练精度
+    correct = 0  # 累计正确预测数
+
+    steps_every_n = 2  # 每经过2个epoch调整一次温度索引k
+    temp_vec = np.linspace(1, 0.001, temp_length)  # 温度衰减序列
+
+    # 遍历训练数据集
+    for batch_idx, (data, target) in enumerate(train_loader):
+
+        # 将数据和标签放到指定设备上
+        data, target = data.to(device), target.to(device)
+        optimizer.zero_grad()  # 梯度清零
+
+        # 对当前batch进行一次前向传播，得到原始预测
+        output_x1 = model(data)
+        output_x1.detach_()  # 阻止梯度回传到这里
+        optimizer.zero_grad()
+
+        # 计算样本属于噪声分布的概率B
+        if epoch == 1:
+            # 第1个epoch默认均匀概率0.5
+            B = 0.5 * torch.ones(len(target)).float().to(device)
+        else:
+            # 后续epoch使用Beta混合模型预测
+            B = compute_probabilities_batch(data, target, model, bmm_model, bmm_model_maxLoss, bmm_model_minLoss)
+            B = B.to(device)
+            # 防止概率为0或1导致数值问题
+            B[B <= 1e-4] = 1e-4
+            B[B >= 1-1e-4] = 1-1e-4
+
+        # 使用Beta权重进行动态MixUp
+        inputs_mixed, targets_1, targets_2, index = mixup_data_beta(data, target, B, device)
+        output = model(inputs_mixed)  # 对混合后的样本前向传播
+        output_mean = F.softmax(output, dim=1)  # 得到混合样本的softmax概率
+        output = F.log_softmax(output, dim=1)  # log_softmax用于计算NLLLoss
+        output_x2 = output_x1[index, :]  # 根据混合索引获取对应的原始预测
+        tab_mean_class = torch.mean(output_mean,-2)  # 计算每个类别的平均概率，用于正则化
+
+        # 选择当前温度
+        Temp = temp_vec[k]
+
+        # 计算Soft/Hard MixUp损失
+        loss = mixup_criterion_SoftHard(output, targets_1, targets_2, B, index, output_x1, output_x2, Temp)
+
+        # 类别分布正则化
+        loss_reg = reg_loss_class(tab_mean_class, num_classes)
+        loss = loss + reg_term*loss_reg
+
+        # 反向传播
+        loss.backward()
+        optimizer.step()
+
+        ################## 监控loss ####################################
+        loss_per_batch.append(loss.item())
+        #################################################################
+
+        # 保存训练精度
+        pred = output.max(1, keepdim=True)[1]  # 取每个样本预测最大概率的类别索引
+        correct += pred.eq(target.view_as(pred)).sum().item()  # 累计正确预测数
+        acc_train_per_batch.append(100. * correct / ((batch_idx+1)*args.batch_size))  # 当前batch平均精度
+
+        # 日志打印
+        if batch_idx % args.log_interval == 0:
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}, Accuracy: {:.0f}%, Learning rate: {:.6f}, Temperature: {:.4f}'.format(
+                epoch, batch_idx * len(data), len(train_loader.dataset),
+                       100. * batch_idx / len(train_loader), loss.item(),
+                       100. * correct / ((batch_idx + 1) * args.batch_size),
+                optimizer.param_groups[0]['lr'], Temp))
+
+    # 计算当前epoch平均损失和精度
+    loss_per_epoch = [np.average(loss_per_batch)]
+    acc_train_per_epoch = [np.average(acc_train_per_batch)]
+
+    # 更新温度索引，每steps_every_n个epoch更新一次
+    countTemp = countTemp + 1
+    if countTemp == steps_every_n:
+        k = k + 1
+        k = min(k, len(temp_vec) - 1)  # 防止索引越界
+        countTemp = 1
+
+    return (loss_per_epoch, acc_train_per_epoch, countTemp, k)
+```
+
+```python
+def mixup_criterion_SoftHard(pred, y_a, y_b, B, index, output_x1, output_x2, Temp):
+    """
+    计算Soft/Hard Bootstrapping + MixUp损失
+    说明：
+    - pred: 模型对混合样本的log_softmax输出
+    - y_a, y_b: 原始样本标签，对应混合前的两个样本
+    - B: 样本属于噪声分布的概率 (Beta权重)
+    - index: 混合索引，对应第二个样本
+    - output_x1, output_x2: 原始样本前向传播得到的log_softmax输出
+    - Temp: 温度参数，用于控制soft label的平滑程度
+    """
+    
+    # 对每个样本计算Soft/Hard损失
+    # 对第一个样本：
+    # (1 - B) * F.nll_loss(pred, y_a) -> 保留ground-truth标签的损失 (Hard部分)
+    # B * (-torch.sum(F.softmax(output_x1/Temp) * pred)) -> 利用模型预测的soft标签进行损失计算 (Soft部分)
+    # 对第二个样本同理，使用B[index]和output_x2
+    loss = torch.sum(
+        (0.5) * (
+                (1 - B) * F.nll_loss(pred, y_a, reduction='none') + 
+                B * (-torch.sum(F.softmax(output_x1/Temp, dim=1) * pred, dim=1))
+        ) +
+        (0.5) * (
+                (1 - B[index]) * F.nll_loss(pred, y_b, reduction='none') + 
+                B[index] * (-torch.sum(F.softmax(output_x2/Temp, dim=1) * pred, dim=1))
+        )
+    ) / len(pred)  # 对batch中的所有样本取平均
+
+    return loss
+```
+
+1. **Hard部分**： `(1 - B) * F.nll_loss(pred, y_a)`
+
+   * 对干净样本，保留ground-truth标签损失。
+
+2. **Soft部分**： `B * (-torch.sum(F.softmax(output_x1/Temp) * pred))`
+
+   * 对噪声样本，用模型预测的概率（经过温度平滑）作为soft label计算损失。
+
+3. **MixUp融合**：
+
+   * 使用 `0.5` 权重对两个混合样本的损失取平均。
+
+4. **温度Temp**：
+
+   * 控制soft label的平滑程度，值越小越接近one-hot，值越大越平滑。
+
+5. **返回值**：
+
+   * 对整个batch的样本损失取平均。
