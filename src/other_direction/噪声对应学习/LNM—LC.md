@@ -623,7 +623,7 @@ def track_training_loss(args, model, device, train_loader, epoch, bmm_model1, bm
     # -------------------------------
     bmm_model = BetaMixture1D(max_iters=10)
     bmm_model.fit(loss_tr)        # 使用归一化后的损失拟合
-    bmm_model.create_lookup(1)    # 创建查找表，用于快速估计后验概率 --- 对同一个样本来说，其属于干净样本分布的概率和属于噪声样本分布的概率之和为1
+    bmm_model.create_lookup(1)    # 创建查找表，用于快速估计样本属于噪声的后验概率 --- 对同一个样本来说，其属于干净样本分布的概率和属于噪声样本分布的概率之和为1
 
     # 返回全量损失、概率、基于预测类别的损失，以及拟合的 BMM 和最大最小损失
     return all_losses.data.numpy(), \
@@ -763,7 +763,7 @@ def mixup_criterion(pred, y_a, y_b, lam):
     return lam * F.nll_loss(pred, y_a) + (1 - lam) * F.nll_loss(pred, y_b)
 ```
 
-### 动态硬自举 + MixUp增强
+### 动态硬自举 + 静态MixUp增强
 
 ```python
 def mixup_data_Boot(x, y, alpha=1.0, device='cuda'):
@@ -925,7 +925,7 @@ def reg_loss_class(mean_tab,num_classes=10):
     return loss
 ```
 
-### 动态软自举 + MixUp增强
+### 动态软自举 + 静态MixUp增强
 
 ```python
 def train_mixUp_SoftBootBeta(args, model, device, train_loader, optimizer, epoch, alpha, bmm_model, bmm_model_maxLoss, \
@@ -1056,3 +1056,112 @@ def mixup_criterion_mixSoft(pred, y_a, y_b, B, lam, index, output_x1, output_x2)
 ```
 > soft label 是直接每个类别乘上其对应的软概率值，再把所有类别的概率值求和，得到当前样本的软损失。
 
+### 动态MixUp增强
+
+```python
+def train_mixUp_Beta(args, model, device, train_loader, optimizer, epoch, alpha, bmm_model,
+                                bmm_model_maxLoss, bmm_model_minLoss):
+    # 设置模型为训练模式
+    model.train()
+    loss_per_batch = []  # 用于记录每个 batch 的 loss
+
+    acc_train_per_batch = []  # 用于记录每个 batch 的训练精度
+    correct = 0  # 统计累计预测正确的样本数
+
+    # 遍历每个 batch
+    for batch_idx, (data, target) in enumerate(train_loader):
+
+        # 将数据和标签放到 GPU/CPU
+        data, target = data.to(device), target.to(device)
+        optimizer.zero_grad()  # 梯度清零
+
+        # 第一个 epoch 用固定 B=0.5，表示一开始不区分干净样本和噪声样本
+        if epoch == 1:
+            B = 0.5 * torch.ones(len(target)).float().to(device)
+        else:
+            # 从 Beta 混合模型中计算每个样本属于“干净样本”的概率 B
+            B = compute_probabilities_batch(data, target, model, bmm_model, bmm_model_maxLoss, bmm_model_minLoss)
+            B = B.to(device)
+            # 限制 B 的取值范围，避免数值不稳定（太接近 0 或 1）
+            B[B <= 1e-4] = 1e-4
+            B[B >= 1 - 1e-4] = 1 - 1e-4
+
+        # 使用 B 控制 mixup 的动态权重，生成混合样本和混合标签
+        inputs_mixed, targets_1, targets_2, index = mixup_data_beta(data, target, B, device)
+
+        # 前向传播
+        output = model(inputs_mixed)
+        output = F.log_softmax(output, dim=1)  # 输出转 log-softmax，用于 NLLLoss
+
+        # 计算 MixUp 的损失（Beta 动态控制的 mixup loss）
+        loss = mixup_criterion_beta(output, targets_1, targets_2)
+
+        # 反向传播
+        loss.backward()
+
+        # 更新参数
+        optimizer.step()
+
+        ################## monitor losses  ####################################
+        loss_per_batch.append(loss.item())  # 保存该 batch 的 loss
+        ########################################################################
+
+        # 保存训练精度：取 log-probability 最大的类别作为预测
+        pred = output.max(1, keepdim=True)[1]  # 预测类别
+        correct += pred.eq(target.view_as(pred)).sum().item()  # 累积正确个数
+        acc_train_per_batch.append(100. * correct / ((batch_idx + 1) * args.batch_size))  # 当前平均精度
+
+        # 打印训练状态（每 log_interval 个 batch 打印一次）
+        if batch_idx % args.log_interval == 0:
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}, Accuracy: {:.0f}%, Learning rate: {:.6f}'.format(
+                epoch, batch_idx * len(data), len(train_loader.dataset),
+                       100. * batch_idx / len(train_loader), loss.item(),
+                       100. * correct / ((batch_idx + 1) * args.batch_size),
+                optimizer.param_groups[0]['lr']))
+
+    # 计算每个 epoch 的平均 loss 和 accuracy
+    loss_per_epoch = [np.average(loss_per_batch)]
+    acc_train_per_epoch = [np.average(acc_train_per_batch)]
+
+    return (loss_per_epoch, acc_train_per_epoch)
+```
+
+```python
+def mixup_data_beta(x, y, B, device='cuda'):
+    '''
+    基于 Beta 混合模型 (BMM) 概率 B 来生成 MixUp 的样本。
+    输入：
+        x: 输入图像 batch，形状 [batch_size, C, H, W]
+        y: 输入标签 batch，形状 [batch_size]
+        B: 每个样本的 Beta 概率（表示该样本干净的概率），形状 [batch_size]
+        device: 使用的设备（默认 'cuda'）
+    输出：
+        mixed_x: MixUp 后的输入图像
+        y_a, y_b: MixUp 对应的两个标签
+        index: 被打乱的索引（用于混合的另一半样本）
+    '''
+
+    batch_size = x.size()[0]  # 当前 batch 的大小
+    
+    # 随机打乱索引，用于 MixUp 配对
+    if device == 'cuda':
+        index = torch.randperm(batch_size).cuda()
+    else:
+        index = torch.randperm(batch_size)
+
+    # 计算归一化因子 lam
+    # lam = (1 - B_i) + (1 - B_j)，保证加权后的比例能正确归一化
+    lam = ((1 - B) + (1 - B[index]))
+
+    # 动态 MixUp：
+    #   1-B : 表示样本是 "干净" 的概率
+    #   按照样本的干净概率加权混合两个图像，干净样本贡献大，噪声样本贡献小
+    #   权重 = (1-B) / lam   和   (1-B[index]) / lam
+    mixed_x = ((1 - B) / lam).unsqueeze(1).unsqueeze(2).unsqueeze(3) * x + \
+              ((1 - B[index]) / lam).unsqueeze(1).unsqueeze(2).unsqueeze(3) * x[index, :]
+
+    # 返回标签对：y 和打乱后的 y[index]
+    y_a, y_b = y, y[index]
+
+    return mixed_x, y_a, y_b, index
+```
