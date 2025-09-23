@@ -16,7 +16,6 @@ footer: 技术共建，知识共享
 - 开源框架 Spring committer
 - Golang 开源网络库 netpoll committer
 - Javaer 转型 多模态,3D视觉方向研究
-- 现就读于四川大学
 
 有问题需要咨询的小伙伴，可以加微信备注来意:
 
