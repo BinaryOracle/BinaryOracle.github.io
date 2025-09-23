@@ -21,10 +21,4 @@ footer: 技术共建，知识共享
 
 ![](assets/images/wx.png) 
 
----
-
-### ![ =50x50](assets/images/head.png) Elowen 
-- CV 转 LLM 领域
-- 现就读于电子科技大学
-
 
