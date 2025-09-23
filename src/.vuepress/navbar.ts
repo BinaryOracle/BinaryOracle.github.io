@@ -5,6 +5,7 @@ export default navbar([
   "/LLM/",
   "/MMLLM/",
   "/3DVL/",
+   '/RAG/',
    "/other_direction/",
  "/open_projects/",
  "/other/",
