@@ -264,7 +264,80 @@ $$
 
 ### Dirichlet 分布
 
+Dirichlet 分布是 **概率向量的分布**，常用作多项式分布参数的 **共轭先验**。
 
+* 假设有 $K$ 个类别，每个类别出现的概率为 $\theta_i$，满足：
+  
+  $$
+  \theta_i \ge 0, \quad \sum_{i=1}^{K} \theta_i = 1
+  $$
 
-## 证据深度学习
+* 如果向量 $\boldsymbol{\theta} = (\theta_1,...,\theta_K)$ 服从 Dirichlet 分布，参数为 $\boldsymbol{\alpha} = (\alpha_1,...,\alpha_K)$，记作：
+  
+  $$
+  \boldsymbol{\theta} \sim \text{Dir}(\alpha_1,...,\alpha_K)
+  $$
 
+* **概率密度函数（PDF）**：
+
+  $$
+  p(\theta_1,...,\theta_K) = \frac{1}{B(\boldsymbol{\alpha})} \prod_{i=1}^{K} \theta_i^{\alpha_i-1}, \quad \theta_i \ge 0, \sum \theta_i = 1
+  $$
+
+* **归一化常数**：
+
+  $$
+  B(\boldsymbol{\alpha}) = \frac{\prod_{i=1}^K \Gamma(\alpha_i)}{\Gamma(\sum_{i=1}^K \alpha_i)}
+  $$
+
+  其中 $\Gamma(\cdot)$ 是 Gamma 函数（阶乘的连续推广）。
+
+> 直观理解
+
+1. **概率向量**
+
+   * Dirichlet 分布生成的是一个满足 $\sum \theta_i = 1$ 的向量。
+   
+   * 适合描述 K 类概率的不确定性。
+
+2. **参数 $\alpha_i$ 的作用**：
+
+   * $\alpha_i > 1$：$\theta_i$ 倾向于大
+   
+   * $\alpha_i < 1$：$\theta_i$ 倾向于接近 0
+   
+   * $\alpha_i = 1$：均匀分布
+
+3. **K=2 时退化成 Beta 分布**：
+   
+   $$
+   \text{Dir}(\alpha_1, \alpha_2) = \text{Beta}(\alpha_1, \alpha_2)
+   $$
+
+> 期望与方差
+
+设 $\alpha_0 = \sum_{i=1}^K \alpha_i$，则：
+
+$$
+\mathbb{E}[\theta_i] = \frac{\alpha_i}{\alpha_0}
+$$
+
+$$
+\text{Var}[\theta_i] = \frac{\alpha_i (\alpha_0 - \alpha_i)}{\alpha_0^2 (\alpha_0+1)}
+$$
+
+$$
+\text{Cov}[\theta_i, \theta_j] = - \frac{\alpha_i \alpha_j}{\alpha_0^2 (\alpha_0+1)}, \quad i \neq j
+$$
+
+* 解释：向量分量之间是负相关的，因为 $\sum \theta_i = 1$。
+
+> 与其他分布的关系
+
+| 分布          | 维度 | 关系                    |
+| ----------- | -- | --------------------- |
+| Beta        | 1  | K=2 的 Dirichlet       |
+| Bernoulli   | 1  | 单次二分类，Beta 是共轭先验      |
+| Binomial    | 1  | 多次二分类，Beta 是共轭先验      |
+| Categorical | K  | 单次多分类，Dirichlet 是共轭先验 |
+| Multinomial | K  | 多次多分类，Dirichlet 是共轭先验 |
