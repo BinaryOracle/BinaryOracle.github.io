@@ -261,3 +261,10 @@ $$
   * **Dubois–Prade 规则**：把冲突分配到交集为空的“并集”。
 
   * **PCR（Proportional Conflict Redistribution）**：把冲突按比例分配回原始冲突的集合。
+
+### Dirichlet 分布
+
+
+
+## 证据深度学习
+
