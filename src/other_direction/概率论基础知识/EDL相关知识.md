@@ -339,3 +339,80 @@ $$
 | Binomial    | 1  | 多次二分类，Beta 是共轭先验      |
 | Categorical | K  | 单次多分类，Dirichlet 是共轭先验 |
 | Multinomial | K  | 多次多分类，Dirichlet 是共轭先验 |
+
+## DS理论与证据深度学习的关系
+
+Dempster-Shafer 理论（DS theory）是一种 **不确定性推理框架**，又叫 **证据理论**。它不像概率论必须对所有事件分配精确概率，DS theory 允许对“集合”分配 **置信质量 (basic belief assignment, BBA)**。结果有三类：
+
+* **信任度 (belief)**：保守下界（多大程度可以肯定事件成立）。
+
+* **似然度 (plausibility)**：乐观上界（多大程度可能事件成立）。
+
+* **未分配证据**：代表模糊、不确定性。
+
+这比单一概率分布更能表达 **不确定性和模糊性**。
+
+---
+
+Evidential Deep Learning (EDL) 的核心目标：让神经网络 **输出不仅仅是概率分布 (softmax)**，而是 **概率分布 + 不确定性度量**。实现思路：
+
+* EDL 把分类问题建模为 **Dirichlet 分布**，其参数由网络输出的“证据 (evidence)”决定。
+
+* 每个类别的证据量类似“观察到多少支持它的证据”，和 DS theory 的“基本信任分配 (BBA)”对应。
+
+* 从证据中可以计算出：
+
+    * **期望概率 (expected probability)** → 相当于传统 softmax 概率。
+  
+    * **不确定性 (uncertainty mass)** → 对应 DS theory 中的“未分配证据”。
+
+换句话说，EDL 实际上是 **把 DS theory 与贝叶斯框架嫁接到深度学习上**。
+
+两者关系总结:
+
+* **理论基础**：EDL 的不确定性建模思想来源于 Dempster-Shafer theory。
+
+* **映射关系**：
+
+  * DS theory 中的 **BBA (基本信任分配)** → EDL 中的 **证据 (evidence)**。
+
+  * DS theory 中的 **未分配信任质量** → EDL 中的 **不确定性分量**。
+
+  * DS theory 中的 **belief/plausibility 区间** → EDL 中的 **Dirichlet 分布参数范围**。
+
+* **改进点**：DS theory 是符号级推理，而 EDL 通过神经网络 **自动学习证据分配**，可扩展到图像识别、NLP 等任务。
+
+**Evidential Deep Learning (EDL) = 深度学习框架下的 Dempster-Shafer 证据理论应用与扩展**。它让网络不仅输出类别概率，还能输出“不确定性”，从而在 **小样本、分布外 (OOD) 检测、风险决策**等场景表现更好。
+
+## DS融合规则并没有在EDL中使用
+
+**Dempster’s Rule of Combination**: 用于将来自不同来源的 **独立证据** 融合成新的信任分配 (BBA)。
+
+- 公式思想：如果两条证据都支持某个事件，就增强其置信；若冲突，则按比例削弱，并把冲突质量重新分配。
+
+- 应用场景：多传感器融合、专家意见整合等。
+
+**EDL 并没有直接使用 Dempster’s combination rule**。它的核心是：
+
+- 神经网络输出“证据” → 转化为 **Dirichlet 分布参数**。
+
+- Dirichlet 分布提供了 **类别概率期望** 和 **不确定性质量**。
+
+- 训练时，EDL 使用的是一种 **损失函数**（基于 **期望交叉熵 + KL 正则**），来约束证据学习，而不是对多来源证据做融合。
+
+---
+
+**DS theory 的 spirit（精神）** 在 EDL 中体现了： “部分证据 + 未分配证据” → “分类概率 + 不确定性”。
+
+**DS theory 的 combination rule** 在 EDL 中 **没有被直接使用**，因为：
+
+  * EDL 假设证据是由同一个神经网络单源生成的，而不是多源传感器/多专家场景。
+
+  * 如果需要多模型/多传感器证据融合，可以在 EDL 的输出层（Dirichlet 参数）或 BBA 表达形式上，再套用 DS 融合规则，但这不是 EDL 标准做法，而是后续研究方向。
+
+---
+
+结论：
+
+**EDL 借鉴了 DS 理论的“信任质量 + 未分配证据”思想，但没有用到 Dempster 的融合规则**。 不过，如果做 **多模型集成、联邦学习、传感器融合**，完全可以把 EDL 学到的证据结果再用 DS 规则做二次融合，这其实是个很有潜力的研究方向。
+
