@@ -1,5 +1,5 @@
 ---
-title: 证据深度学习概念和完整推导过程
+title: 证据深度学习相关知识整理
 icon: file
 category:
   - 概率论
@@ -12,13 +12,11 @@ author:
   - BinaryOracle
 ---
 
-`证据深度学习概念和完整推导过程` 
+`证据深度学习相关知识整理` 
 
 <!-- more -->
 
-## 前置知识
-
-### 主观逻辑 (Subjective Logic)
+## 主观逻辑 (Subjective Logic)
 
 **主观逻辑 (Subjective Logic)** 是一种**概率逻辑**，它明确地将**认知不确定性**和**信息源信任度**纳入考量。简单来说，它是一种用于在**不确定、信息不完整或信息源不可靠**的情况下进行推理和决策的数学框架。
 
@@ -64,7 +62,7 @@ $$P(x) = b_x + a_x u_x$$
 
 主观逻辑特别适用于建模**信任网络**。它允许在聚合来自不同来源的信息时，考虑每个信息来源的**信任度**，通过“**折算 (Discounting)**”等操作来调整意见。
 
-### Dempster-Shafer 证据理论 (DST)
+## Dempster-Shafer 证据理论 (DST)
 
 **Dempster-Shafer 证据理论 (DST, Dempster-Shafer Theory of Evidence)**，又称 **信度理论 (Theory of Belief Functions)**，是一种用于 **不确定性推理** 的数学框架。
 
@@ -136,7 +134,7 @@ $$
     
 - 意义：如果两个证据源冲突较大（K接近1），合成后的结果会受到显著影响。
 
-#### Dempster 合成规则
+### Dempster 合成规则
 
 我们想判断一个目标是不是 **猫(Cat)** 还是 **狗(Dog)**。识别框架：$\Theta = {\text{Cat}, \text{Dog}}$。
 
@@ -218,7 +216,7 @@ $$
 
 * 中间的大冲突（0.48）被“抹掉”，剩余证据按比例分给了相容的结果。
 
-##### 为什么抹除冲突部分 ？
+#### 为什么抹除冲突部分 ？
 
 在合成两个证据时，如果一个证据支持集合 (A)，另一个证据支持集合 (B)，而 **(A \cap B = \varnothing)**，就出现了冲突。
 
@@ -262,7 +260,7 @@ $$
 
   * **PCR（Proportional Conflict Redistribution）**：把冲突按比例分配回原始冲突的集合。
 
-### Dirichlet 分布
+## Dirichlet 分布
 
 Dirichlet 分布是 **概率向量的分布**，常用作多项式分布参数的 **共轭先验**。
 
@@ -341,18 +339,3 @@ $$
 | Binomial    | 1  | 多次二分类，Beta 是共轭先验      |
 | Categorical | K  | 单次多分类，Dirichlet 是共轭先验 |
 | Multinomial | K  | 多次多分类，Dirichlet 是共轭先验 |
-
-## 证据深度学习
-
-证据深度学习是一种结合 **贝叶斯思想** 的深度学习方法，它不仅预测类别（或回归值），还量化预测的不确定性。传统深度学习（如 softmax 分类）只给出类别概率，但无法区分“模型不确定”（epistemic uncertainty）与“数据本身噪声”（aleatoric uncertainty）。EDL 通过 **证据理论（Dempster–Shafer Theory）** 建模预测的不确定性。
-
-核心思想：
-
-1. 对于分类问题，EDL 假设每个类别的概率是一个 **Dirichlet 分布** 的样本。
-
-2. 神经网络不直接输出类别概率，而是输出 **证据值（evidence）**。
-
-3. 证据越大 → 模型越自信；证据越小 → 模型越不确定。
-
-4. 不确定性可以自然量化，帮助处理噪声标签、异常样本、迁移学习等场景。
-
