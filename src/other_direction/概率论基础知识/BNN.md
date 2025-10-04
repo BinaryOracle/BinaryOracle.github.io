@@ -4,7 +4,7 @@ icon: file
 category:
   - 概率论
 tag:
-  - 已发布
+  - 编辑中
 footer: 技术共建，知识共享
 date: 2025-09-28
 order: 3
