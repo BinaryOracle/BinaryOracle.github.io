@@ -262,8 +262,11 @@ $$
 L_m(\alpha_m) = \sum_{k=1}^K y_k \big(\psi(\alpha_0^m) - \psi(\alpha_k^m)\big) + \lambda D_{\text{KL}}\big[\text{Dir}(p_m \mid \tilde{\alpha}_m),|, \text{Dir}(p_m \mid [1,\cdots,1])\big]. \tag{9}
 $$
 
-UIMC 的伪代码在算法 1 中给出。
+个人绘制的完整方法执行流程:
 
-### 背景知识
+![](1/2.png)
+
+DS 融合规则简单案例图解:
+
 
 
