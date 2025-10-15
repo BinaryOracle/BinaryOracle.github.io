@@ -1,5 +1,5 @@
 ---
-title: 概率论基础模型
+title: 概率论基础模型01
 icon: file
 category:
   - 概率论
